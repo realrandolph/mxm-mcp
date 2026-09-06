@@ -54,6 +54,7 @@ class TestXMLParser:
         head = root.find("head")
         assert head is not None
         assert head.get("bpm") == "120"
+        assert root.find("song/timeline").get("stopbehaviour") == "1"
 
     def test_create_empty_project_uses_installed_lmms_version(self, monkeypatch):
         from lmms_mcp import lmms_app
@@ -132,6 +133,7 @@ class TestXMLParser:
         notes = pattern.findall("note")
         assert len(notes) == 1
         assert notes[0].get("key") == "60"
+        assert notes[0].get("type") == "0"
 
 
 class TestProject:

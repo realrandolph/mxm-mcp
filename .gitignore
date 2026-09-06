@@ -39,6 +39,7 @@ desktop.ini
 *.mmpz
 *.mmp
 !tests/fixtures/*.mmp
+!validation_lmms13_native_carla_surge.mmp
 *.mpt
 
 # opencode

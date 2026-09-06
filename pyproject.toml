@@ -47,3 +47,6 @@ packages = ["src/lmms_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: exercises an installed LMMS application and plugins",
+]

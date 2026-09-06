@@ -164,7 +164,7 @@ def create_empty_project(
         "x": "1", "y": "1", "maximized": "0", "minimized": "0",
     })
     ET.SubElement(song, "timeline", {
-        "lp0pos": "0", "lp1pos": "192", "lpstate": "0",
+        "lp0pos": "0", "lp1pos": "192", "lpstate": "0", "stopbehaviour": "1",
     })
     ET.SubElement(song, "controllers")
 
@@ -493,7 +493,7 @@ def load_carla_plugin(
 
 def configure_reference_carla_track(track: ET.Element) -> None:
     """Apply the LMMS track structure used by the working Carla project."""
-    track.set("mutedBeforeSolo", "229")
+    track.set("mutedBeforeSolo", "1")
     inst_track = track.find("instrumenttrack")
     if inst_track is None:
         raise ValueError("Carla track has no instrumenttrack")
@@ -677,7 +677,7 @@ def add_note_to_track(
         if pattern is None:
             pname = pattern_name or track.get("name", "Pattern")
             pattern = ET.SubElement(track, "midiclip", {
-                "type": "1", "off": "0", "muted": "0", "name": "",
+                "type": "1", "off": "0", "muted": "0", "name": pname,
                 "steps": "16", "pos": "0", "autoresize": "1", "len": "192",
             })
     elif track_type == 1:
@@ -700,6 +700,7 @@ def add_note_to_track(
         raise ValueError(f"Cannot add notes to track type {track_type_name(track_type)}")
 
     note = ET.SubElement(pattern, "note", {
+        "type": "0",
         "len": str(length),
         "key": str(key),
         "vol": str(volume),
