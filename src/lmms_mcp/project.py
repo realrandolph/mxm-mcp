@@ -160,7 +160,7 @@ class LMMSProject:
         if instrument is not None:
             track.instrument = instrument.get("name", "")
 
-        for pattern_elem in elem.findall("pattern"):
+        for pattern_elem in [*elem.findall("pattern"), *elem.findall("midiclip")]:
             pattern = Pattern(
                 name=pattern_elem.get("name", "Pattern"),
                 pattern_type=int(pattern_elem.get("type", "1")),
@@ -180,11 +180,9 @@ class LMMSProject:
 
     def _parse_pattern_track(self, elem: ET.Element, track: Track) -> None:
         """Parse beat/bassline pattern track."""
-        bbtrack = elem.find("bbtrack")
-        if bbtrack is None:
-            return
-
-        container = bbtrack.find("trackcontainer")
+        container = elem.find("patterntrack/trackcontainer")
+        if container is None:
+            container = elem.find("bbtrack/trackcontainer")
         if container is None:
             return
 

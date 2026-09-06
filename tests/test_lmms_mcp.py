@@ -105,12 +105,29 @@ class TestXMLParser:
         assert tracks[0].get("name") == "My Synth"
         assert tracks[0].get("type") == "0"
 
+    def test_instrument_track_uses_lmms_13_defaults(self):
+        root = create_empty_project()
+        add_instrument_track(root, "TripleOscillator")
+        track = find_tracks(root)[0]
+        inst_track = track.find("instrumenttrack")
+        assert track.get("mutedBeforeSolo") == "0"
+        assert inst_track.attrib["basenote"] == "69"
+        assert {f"cc{i}" for i in range(128)} == set(
+            inst_track.find("midicontrollers").attrib
+        )
+        osc = inst_track.find("instrument/tripleoscillator")
+        assert osc.get("vol0") == "33"
+        assert osc.get("coarse1") == "-12"
+        assert osc.find("key") is not None
+        assert inst_track.find("eldata/elvol").get("hold") == "0.5"
+        assert inst_track.find("arpeggiator").get("arptime") == "100"
+
     def test_add_note(self):
         root = create_empty_project()
         add_instrument_track(root, "Test Track")
         add_note_to_track(root, 0, key=60, pos=0, length=48)
         tracks = find_tracks(root)
-        pattern = tracks[0].find("pattern")
+        pattern = tracks[0].find("midiclip")
         assert pattern is not None
         notes = pattern.findall("note")
         assert len(notes) == 1
@@ -747,7 +764,7 @@ class TestCustomPluginsAndVst:
             loaded = xml_parser.load_project(path)
             assert loaded.find(".//CARLA-PROJECT/Plugin/Info/Type").text == "LV2"
             assert loaded.find(".//CARLA-PROJECT/Plugin/Info/URI").text == xml_parser.SURGE_XT_LV2_URI
-            assert loaded.find(".//track[@name='Surge']/pattern/note").get("key") == "60"
+            assert loaded.find(".//track[@name='Surge']/midiclip/note").get("key") == "60"
 
     def test_carla_rejects_unknown_plugin_identifier(self):
         from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
@@ -780,10 +797,14 @@ class TestCustomPluginsAndVst:
         state = root.find(".//CARLA-PROJECT")
         assert state.get("VERSION") == "2.5"
         assert state.findtext("Plugin/Info/URI") == xml_parser.SURGE_XT_LV2_URI
-        assert state.findtext("Plugin/Data/CustomData/Key") == (
-            f"{xml_parser.SURGE_XT_LV2_URI}:StateString"
-        )
-        assert root.find(".//track[@name='Carla Surge']/pattern/note").get("key") == "60"
+        custom_keys = [
+            item.text for item in state.findall("Plugin/Data/CustomData/Key")
+        ]
+        assert f"{xml_parser.SURGE_XT_LV2_URI}:StateString" in custom_keys
+        note = root.find(".//track[@name='Carla Surge']/midiclip/note")
+        if note is None:
+            note = root.find(".//track[@name='Carla Surge']/pattern/note")
+        assert note.get("key") == "60"
 
     def test_linux_effect_serialization(self):
         from lmms_mcp.effects import add_external_effect
@@ -817,7 +838,7 @@ class TestSilenceRegressions:
         root = create_empty_project()
         add_instrument_track(root, "Lead")
         res = add_note_to_track(root, 0, key=57, pos=768, length=96)
-        pattern = find_tracks(root)[0].find("pattern")
+        pattern = find_tracks(root)[0].find("midiclip")
         assert pattern.get("len") == "864"
         assert res["extended_len"] is True
 
@@ -825,7 +846,7 @@ class TestSilenceRegressions:
         root = create_empty_project()
         add_instrument_track(root, "Lead")
         res = add_note_to_track(root, 0, key=57, pos=48, length=48)
-        pattern = find_tracks(root)[0].find("pattern")
+        pattern = find_tracks(root)[0].find("midiclip")
         assert pattern.get("len") == "192"
         assert res["extended_len"] is False
 
@@ -860,8 +881,8 @@ class TestSilenceRegressions:
         the documented workflow must work out of the box."""
         root = create_empty_project()
         add_pattern_track(root, "Drums")
-        bb = find_tracks(root)[0].find("bbtrack")
-        inner = bb.findall("trackcontainer/track")
+        patternstore = find_tracks(root)[0].find("patterntrack")
+        inner = patternstore.findall("trackcontainer/track")
         assert len(inner) == 1
         assert inner[0].get("type") == "0"
         res = add_note_to_track(root, 0, key=36, pos=0, length=48)

@@ -279,48 +279,73 @@ def _make_instrument_track(
         "muted": "0",
         "type": "0",
         "name": name,
+        "mutedBeforeSolo": "0",
         "solo": "0",
     })
 
     inst_track = ET.SubElement(track, "instrumenttrack", {
+        "enabled": "0",
+        "scale": "0",
         "pan": str(panning),
         "mixch": str(mixer_channel),
+        "basenote": "69",
         "usemasterpitch": "1",
+        "range_import": "1",
+        "lastkey": "127",
         "pitchrange": "1",
+        "firstkey": "0",
         "pitch": "0",
-        "basenote": "57",
+        "keymap": "0",
+        "enablecc": "0",
         "vol": str(volume),
     })
 
+    ET.SubElement(inst_track, "midicontrollers", {
+        f"cc{controller}": "0" for controller in range(128)
+    })
+
     inst = ET.SubElement(inst_track, "instrument", {"name": instrument})
-    ET.SubElement(inst, instrument.replace(" ", "").lower())
+    plugin_tag = instrument.replace(" ", "").lower()
+    plugin = ET.SubElement(inst, plugin_tag)
+    if plugin_tag == "tripleoscillator":
+        # These are the defaults written by LMMS 1.3 for a new TripleOscillator.
+        plugin.attrib.update({
+            "stphdetun1": "0", "finer1": "0", "modalgo3": "2",
+            "finel1": "0", "wavetype0": "0", "coarse0": "0",
+            "vol0": "33", "vol1": "33", "finer0": "0", "vol2": "33",
+            "coarse2": "-24", "coarse1": "-12", "phoffset1": "0",
+            "finer2": "0", "finel2": "0", "modalgo1": "2",
+            "modalgo2": "2", "wavetype1": "0", "stphdetun0": "0",
+            "userwavefile1": "", "useWaveTable2": "1", "phoffset2": "0",
+            "pan0": "0", "wavetype2": "0", "userwavefile2": "",
+            "phoffset0": "0", "stphdetun2": "0", "useWaveTable3": "1",
+            "pan1": "0", "finel0": "0", "useWaveTable1": "1",
+            "userwavefile0": "", "pan2": "0",
+        })
+    ET.SubElement(plugin, "key")
 
     eldata = ET.SubElement(inst_track, "eldata", {
         "fres": "0.5", "ftype": "0", "fcut": "14000", "fwet": "0",
     })
     ET.SubElement(eldata, "elvol", {
-        "lspd_denominator": "4", "sustain": "0.5",
-        "lspd_numerator": "4", "attack": "0", "decay": "0.5",
-        "hold": "0", "amount": "0",
+        "lspd_denominator": "4", "dec": "0.5", "userwavefile": "",
+        "pdel": "0", "amt": "0", "lspd": "0.1", "ctlenvamt": "0",
+        "lspd_syncmode": "0", "att": "0", "lspd_numerator": "4",
+        "lshp": "0", "latt": "0", "lpdel": "0", "x100": "0",
+        "hold": "0.5", "rel": "0.1", "sustain": "0.5", "lamt": "0",
     })
-    ET.SubElement(eldata, "elcut", {
-        "lspd_denominator": "4", "sustain": "0.5",
-        "lspd_numerator": "4", "attack": "0", "decay": "0.5",
-        "hold": "0", "amount": "0",
-    })
-    ET.SubElement(eldata, "elres", {
-        "lspd_denominator": "4", "sustain": "0.5",
-        "lspd_numerator": "4", "attack": "0", "decay": "0.5",
-        "hold": "0", "amount": "0",
-    })
+    for envelope in ("elcut", "elres"):
+        ET.SubElement(eldata, envelope, dict(eldata.find("elvol").attrib))
 
     ET.SubElement(inst_track, "chordcreator", {
         "chord": "0", "chordrange": "1", "chord-enabled": "0",
     })
     ET.SubElement(inst_track, "arpeggiator", {
-        "arp": "0", "arp-enabled": "0",
-        "arpcenter": "0", "arpdir": "0", "arprange": "1",
-        "arpspeed": "4", "arpType": "0",
+        "arpskip": "0", "arpgate": "100", "arpmiss": "0",
+        "arprange": "1", "arptime_denominator": "4", "arprepeats": "1",
+        "arp": "0", "arpmode": "0", "arp-enabled": "0", "arpdir": "0",
+        "arpcycle": "0", "arptime_syncmode": "0", "arptime_numerator": "4",
+        "arptime": "100",
     })
     ET.SubElement(inst_track, "midiport", {
         "inputcontroller": "0", "fixedoutputvelocity": "-1",
@@ -595,10 +620,10 @@ def add_pattern_track(root: ET.Element, name: str = "Pattern 0") -> ET.Element:
         "solo": "0",
     })
 
-    bbtrack = ET.SubElement(track, "bbtrack")
-    bb_container = ET.SubElement(bbtrack, "trackcontainer", {
-        "width": "640", "x": "610", "y": "5", "maximized": "0",
-        "height": "400", "visible": "0", "type": "bbtrackcontainer",
+    patterntrack = ET.SubElement(track, "patterntrack")
+    bb_container = ET.SubElement(patterntrack, "trackcontainer", {
+        "width": "736", "x": "610", "y": "5", "maximized": "0",
+        "height": "400", "visible": "0", "type": "patternstore",
         "minimized": "0",
     })
     _make_instrument_track(bb_container, name, instrument="kicker")
@@ -607,8 +632,8 @@ def add_pattern_track(root: ET.Element, name: str = "Pattern 0") -> ET.Element:
 
 
 def _select_pattern(track: ET.Element, pattern_index: int | None) -> ET.Element | None:
-    """Pick a pattern element from a track (by index, else the first)."""
-    patterns = track.findall("pattern")
+    """Pick an instrument clip from a track (by index, else the first)."""
+    patterns = track.findall("pattern") + track.findall("midiclip")
     if pattern_index is not None:
         if not 0 <= pattern_index < len(patterns):
             raise IndexError(
@@ -651,15 +676,14 @@ def add_note_to_track(
         pattern = _select_pattern(track, pattern_index)
         if pattern is None:
             pname = pattern_name or track.get("name", "Pattern")
-            pattern = ET.SubElement(track, "pattern", {
-                "len": "192", "muted": "0", "name": pname,
-                "steps": "16", "pos": "0", "type": "1",
+            pattern = ET.SubElement(track, "midiclip", {
+                "type": "1", "off": "0", "muted": "0", "name": "",
+                "steps": "16", "pos": "0", "autoresize": "1", "len": "192",
             })
     elif track_type == 1:
-        bbtrack = track.find("bbtrack")
-        if bbtrack is None:
-            raise ValueError("Pattern track has no bbtrack element")
-        container = bbtrack.find("trackcontainer")
+        container = track.find("patterntrack/trackcontainer")
+        if container is None:
+            container = track.find("bbtrack/trackcontainer")
         if container is None:
             raise ValueError("Pattern track has no trackcontainer")
         inner_tracks = container.findall("track")
@@ -862,10 +886,11 @@ def get_arrangement(root: ET.Element) -> list[dict]:
         ttype = get_track_type(track)
         tname = track.get("name", "?")
         if ttype == 0:
-            for pat in track.findall("pattern"):
+            for pat in [*track.findall("pattern"), *track.findall("midiclip")]:
                 notes = pat.findall("note")
                 clips.append({
-                    "track_index": idx, "track": tname, "kind": "pattern",
+                    "track_index": idx, "track": tname,
+                    "kind": "midiclip" if pat.tag == "midiclip" else "pattern",
                     "name": pat.get("name", ""),
                     "pos": _to_int(pat.get("pos", "0")),
                     "len": _to_int(pat.get("len", "192")),
@@ -921,7 +946,7 @@ def move_clip(
         raise IndexError(f"Track index {track_index} out of range")
     track = tracks[track_index]
 
-    tags = ["pattern", "bbtco", "sampleclip"]
+    tags = ["pattern", "midiclip", "bbtco", "sampleclip"]
     old_position = _to_int(old_position, -1)
     new_position = _to_int(new_position, 0)
     for tag in tags:
@@ -949,7 +974,7 @@ def delete_clip(root: ET.Element, track_index: int, position: int) -> dict:
     track = tracks[track_index]
 
     position = _to_int(position, -1)
-    for tag in ["pattern", "bbtco", "sampleclip"]:
+    for tag in ["pattern", "midiclip", "bbtco", "sampleclip"]:
         for clip in track.findall(tag):
             if _to_int(clip.get("pos", "-1"), -1) == position:
                 track.remove(clip)
