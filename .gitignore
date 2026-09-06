@@ -38,6 +38,7 @@ desktop.ini
 # LMMS MCP specific
 *.mmpz
 *.mmp
+!tests/fixtures/*.mmp
 *.mpt
 
 # opencode

@@ -1,5 +1,6 @@
 """XML parser for LMMS .mmpz and .mmp project files."""
 
+import base64
 import struct
 import zlib
 from pathlib import Path
@@ -96,11 +97,16 @@ def create_empty_project(
     master_pitch: int = 0,
 ) -> ET.Element:
     """Create a minimal empty LMMS project element tree."""
+    from .lmms_app import get_lmms_version
+
+    creator_version = get_lmms_version() or "1.2.0"
     root = ET.Element("lmms-project", {
-        "version": "1.0",
-        "creator": "LMMS MCP Server",
-        "creatorversion": "1.2.0",
+        "version": "31",
+        "creator": "LMMS",
+        "creatorplatform": "linux",
+        "creatorversion": creator_version,
         "type": "song",
+        "creatorplatformtype": "linuxmint",
     })
 
     head = ET.SubElement(root, "head", {
@@ -161,6 +167,29 @@ def create_empty_project(
         "lp0pos": "0", "lp1pos": "192", "lpstate": "0",
     })
     ET.SubElement(song, "controllers")
+
+    # LMMS indexes these tables while loading version-31 projects. Keeping
+    # the default tables present matches projects written by LMMS itself.
+    scales = ET.SubElement(song, "scales")
+    default_scale = ET.SubElement(scales, "scale", {"description": "12-tone EDO (default)"})
+    ET.SubElement(default_scale, "interval", {"num": "1", "den": "1"})
+    for cents in range(100, 1200, 100):
+        ET.SubElement(default_scale, "interval", {"cents": str(cents)})
+    ET.SubElement(default_scale, "interval", {"num": "2", "den": "1"})
+    for _ in range(11):
+        scale = ET.SubElement(scales, "scale", {"description": "empty"})
+        ET.SubElement(scale, "interval", {"num": "1", "den": "1"})
+
+    keymaps = ET.SubElement(song, "keymaps")
+    ET.SubElement(keymaps, "keymap", {
+        "last_key": "127", "description": "all keys 1:1 (default)",
+        "base_freq": "440", "first_key": "0", "base_key": "69", "middle_key": "0",
+    })
+    for _ in range(9):
+        ET.SubElement(keymaps, "keymap", {
+            "last_key": "127", "description": "empty", "base_freq": "440",
+            "first_key": "0", "base_key": "69", "middle_key": "60",
+        })
 
     return root
 
@@ -321,6 +350,187 @@ def add_instrument_track(
     return _make_instrument_track(
         container, name, instrument, mixer_channel, volume, panning
     )
+
+
+SURGE_XT_LV2_URI = "https://surge-synthesizer.github.io/lv2/surge-xt"
+_SURGE_XT_STATE_FILE = Path(__file__).with_name("carla_surge_state.b64")
+
+_CARLA_ENGINE_SETTINGS = {
+    "ForceStereo": "false",
+    "PreferPluginBridges": "false",
+    "PreferUiBridges": "true",
+    "UIsAlwaysOnTop": "false",
+    "MaxParameters": "200",
+    "UIBridgesTimeout": "4000",
+    "LADSPA_PATH": "/home/dolf/.ladspa:/usr/lib/ladspa:/usr/local/lib/ladspa",
+    "DSSI_PATH": "/home/dolf/.dssi:/usr/lib/dssi:/usr/local/lib/dssi",
+    "LV2_PATH": "/home/dolf/.lv2:/usr/lib/lv2:/usr/local/lib/lv2",
+    "VST2_PATH": "/home/dolf/.vst:/usr/lib/vst:/usr/local/lib/vst/home/dolf/.lxvst:/usr/lib/lxvst:/usr/local/lib/lxvst:/home/dolf/.wine/drive_c/Program Files/VstPlugins:/home/dolf/.wine/drive_c/Program Files (x86)/VstPlugins",
+    "VST3_PATH": "/home/dolf/.vst3:/usr/lib/vst3:/usr/local/lib/vst3:/home/dolf/.wine/drive_c/Program Files/Common Files/VST3:/home/dolf/.wine/drive_c/Program Files (x86)/Common Files/VST3",
+    "SF2_PATH": "/home/dolf/.sounds/sf2:/home/dolf/.sounds/sf3:/usr/share/sounds/sf2:/usr/share/sounds/sf3:/usr/share/soundfonts",
+    "SFZ_PATH": "/home/dolf/.sounds/sfz:/usr/share/sounds/sfz",
+    "JSFX_PATH": "/home/dolf/.config/REAPER/Effects",
+}
+
+
+def _surge_xt_state_string() -> str:
+    """Return the exact Surge XT state captured from the working project."""
+    try:
+        encoded = _SURGE_XT_STATE_FILE.read_text(encoding="ascii")
+        return zlib.decompress(base64.b64decode(encoded)).decode("utf-8")
+    except (OSError, ValueError, zlib.error) as exc:
+        raise RuntimeError("Packaged Carla/Surge XT state is unavailable") from exc
+
+
+def _carla_plugin_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".vst3":
+        return "VST3"
+    if suffix == ".clap":
+        return "CLAP"
+    if suffix == ".lv2":
+        return "LV2"
+    raise ValueError("Carla supports only VST3 bundles, CLAP files, and LV2 bundles")
+
+
+def _carla_state(path: Path, plugin_id: str = "") -> ET.Element:
+    """Build the Carla project document accepted by CarlaInstrument::loadSettings."""
+    plugin_type = _carla_plugin_type(path)
+    identifier = plugin_id.strip()
+    if plugin_type == "LV2":
+        if not identifier or not identifier.startswith(("http://", "https://")):
+            raise ValueError("LV2 plugins require their URI as plugin_id")
+    elif path.name.lower() in {"surge xt.vst3", "surge xt.clap"}:
+        raise ValueError("Surge XT must use its installed LV2 build through Carla")
+    elif not identifier:
+        raise ValueError(
+            f"{plugin_type} plugin identifier is required; Carla cannot reliably "
+            "select a plugin from the path alone"
+        )
+
+    state = ET.Element("CARLA-PROJECT", {"VERSION": "2.5"})
+    if plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI:
+        engine = ET.SubElement(state, "EngineSettings")
+        for name, value in _CARLA_ENGINE_SETTINGS.items():
+            ET.SubElement(engine, name).text = value
+    plugin = ET.SubElement(state, "Plugin")
+    info = ET.SubElement(plugin, "Info")
+    ET.SubElement(info, "Type").text = plugin_type
+    ET.SubElement(info, "Name").text = "Surge XT" if identifier == SURGE_XT_LV2_URI else path.stem
+    if plugin_type == "LV2":
+        ET.SubElement(info, "URI").text = identifier
+    else:
+        ET.SubElement(info, "Binary").text = str(path)
+        ET.SubElement(info, "Label" if plugin_type == "VST3" else "Identifier").text = identifier
+    data = ET.SubElement(plugin, "Data")
+    ET.SubElement(data, "Active").text = "Yes"
+    if plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI:
+        ET.SubElement(data, "ControlChannel").text = "1"
+    ET.SubElement(data, "Options").text = "0x3f1" if (
+        plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI
+    ) else "0x0"
+    if plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI:
+        custom = ET.SubElement(data, "CustomData")
+        ET.SubElement(custom, "Type").text = "http://lv2plug.in/ns/ext/atom#String"
+        ET.SubElement(custom, "Key").text = f"{SURGE_XT_LV2_URI}:StateString"
+        ET.SubElement(custom, "Value").text = _surge_xt_state_string()
+    return state
+
+
+def load_carla_plugin(
+    root: ET.Element,
+    track_index: int,
+    plugin_path: str | Path,
+    plugin_id: str = "",
+) -> dict:
+    """Replace a Carla instrument's opaque state with a validated Carla project."""
+    path = Path(plugin_path)
+    if not path.exists():
+        raise ValueError(f"Plugin not found: {plugin_path}")
+    track = find_track_element(root, track_index)
+    instrument = track.find("instrumenttrack/instrument")
+    if instrument is None or instrument.get("name") not in {"carlarack", "carlapatchbay"}:
+        raise ValueError(f"Track {track_index} is not a Carla instrument track")
+    state = _carla_state(path, plugin_id)
+    wrapper = instrument.find(instrument.get("name"))
+    if wrapper is None:
+        wrapper = ET.SubElement(instrument, instrument.get("name"))
+    for child in list(wrapper):
+        wrapper.remove(child)
+    wrapper.append(state)
+    ET.SubElement(wrapper, "key")
+    return {
+        "plugin": str(path),
+        "plugin_type": state.findtext("Plugin/Info/Type"),
+        "plugin_id": plugin_id,
+    }
+
+
+def configure_reference_carla_track(track: ET.Element) -> None:
+    """Apply the LMMS track structure used by the working Carla project."""
+    track.set("mutedBeforeSolo", "229")
+    inst_track = track.find("instrumenttrack")
+    if inst_track is None:
+        raise ValueError("Carla track has no instrumenttrack")
+    inst_track.attrib.clear()
+    inst_track.attrib.update({
+        "range_import": "1", "pitchrange": "1", "pan": "0",
+        "usemasterpitch": "1", "keymap": "0", "pitch": "0",
+        "lastkey": "127", "scale": "0", "enablecc": "0", "vol": "100",
+        "mixch": "0", "enabled": "0", "basenote": "69", "firstkey": "0",
+    })
+    controllers = inst_track.find("midicontrollers")
+    if controllers is None:
+        controllers = ET.Element("midicontrollers")
+        inst_track.insert(0, controllers)
+    controllers.attrib.clear()
+    controllers.attrib.update({f"cc{number}": "0" for number in range(128)})
+
+    instrument = inst_track.find("instrument")
+    wrapper = instrument.find("carlarack") if instrument is not None else None
+    if wrapper is None:
+        raise ValueError("Carla track has no carlarack instrument")
+    wrapper.attrib.clear()
+    wrapper.attrib.update({f"PARAM_KNOB_{number}": "0" for number in range(3, 110)})
+
+    eldata = inst_track.find("eldata")
+    if eldata is not None:
+        eldata.attrib.clear()
+        eldata.attrib.update({"fcut": "14000", "fwet": "0", "ftype": "0", "fres": "0.5"})
+        for child in list(eldata):
+            eldata.remove(child)
+        envelope = {
+            "lshp": "0", "lspd_denominator": "4", "dec": "0.5",
+            "hold": "0.5", "lamt": "0", "lspd_numerator": "4",
+            "ctlenvamt": "0", "x100": "0", "lpdel": "0", "rel": "0.1",
+            "lspd_syncmode": "0", "amt": "0", "pdel": "0", "userwavefile": "",
+            "latt": "0", "att": "0", "lspd": "0.1", "sustain": "0.5",
+        }
+        for name in ("elvol", "elcut", "elres"):
+            ET.SubElement(eldata, name, envelope)
+    chord = inst_track.find("chordcreator")
+    if chord is not None:
+        chord.attrib.clear()
+        chord.attrib.update({"chord-enabled": "0", "chord": "0", "chordrange": "1"})
+    arp = inst_track.find("arpeggiator")
+    if arp is not None:
+        arp.attrib.clear()
+        arp.attrib.update({
+            "arpskip": "0", "arptime_denominator": "4", "arpmode": "0",
+            "arp": "0", "arp-enabled": "0", "arprepeats": "1", "arpdir": "0",
+            "arpmiss": "0", "arptime_numerator": "4", "arptime": "200",
+            "arprange": "1", "arpgate": "100", "arpcycle": "0",
+            "arptime_syncmode": "0",
+        })
+    midiport = inst_track.find("midiport")
+    if midiport is not None:
+        midiport.attrib.clear()
+        midiport.attrib.update({
+            "outputprogram": "1", "basevelocity": "63", "fixedoutputnote": "-1",
+            "inputcontroller": "-1", "fixedoutputvelocity": "-1", "readable": "0",
+            "outputchannel": "1", "outputcontroller": "-1", "writable": "0",
+            "fixedinputvelocity": "-1", "inputchannel": "0",
+        })
 
 
 def add_sample_track(

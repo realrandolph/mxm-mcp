@@ -11,6 +11,7 @@ LMMS 1.2.x and 1.3.x differ in plugin availability, e.g.:
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,7 @@ _CANDIDATE_EXES = [
     Path("C:/Program Files/LMMS/lmms.exe"),
     Path("C:/Program Files (x86)/LMMS/lmms.exe"),
     Path.home() / "AppData/Local/Programs/LMMS/lmms.exe",
+    Path.home() / ".local/bin/lmms",
 ]
 
 
@@ -32,29 +34,48 @@ def find_lmms_exe() -> Path | None:
 
 def get_plugins_dir() -> Path | None:
     """Return the plugins directory of the installed LMMS."""
+    configured = os.environ.get("LMMS_PLUGIN_DIR")
+    if configured and Path(configured).is_dir():
+        return Path(configured)
     exe = find_lmms_exe()
     if exe is None:
         return None
-    plugins = exe.parent / "plugins"
-    return plugins if plugins.is_dir() else None
+    candidates = [exe.parent / "plugins"]
+    if os.name != "nt":
+        candidates.extend((Path(p) for p in (
+            "/usr/lib/x86_64-linux-gnu/lmms",
+            "/usr/lib/lmms",
+            "/usr/local/lib/lmms",
+        )))
+    return next((p for p in candidates if p.is_dir()), None)
 
 
 def get_installed_plugins() -> set[str]:
     """Set of plugin library names shipped with the installed LMMS.
 
-    Names are lowercase DLL basenames (e.g. "tripleoscillator",
-    "reverbsc"). Returns an empty set if LMMS is not found.
+    Names are lowercase LMMS plugin basenames (e.g. "tripleoscillator",
+    "reverbsc", "carlarack"). Returns an empty set if LMMS is not found.
     """
     plugins_dir = get_plugins_dir()
     if plugins_dir is None:
         return set()
-    return {
-        f.stem.lower() for f in plugins_dir.glob("*.dll")
-    }
+    names = set()
+    for f in plugins_dir.iterdir():
+        if f.suffix.lower() not in {".dll", ".so", ".dylib"}:
+            continue
+        stem = f.stem.lower()
+        if stem.startswith("lib"):
+            stem = stem[3:]
+        names.add(stem)
+    return names
 
 
 def get_lmms_version() -> str | None:
-    """Version string of the installed LMMS (e.g. '1.2.2'), or None."""
+    """Version string of the installed LMMS, or None.
+
+    Keep prerelease and build components because LMMS writes the complete
+    application version into a project's creator metadata.
+    """
     exe = find_lmms_exe()
     if exe is None:
         return None
@@ -63,7 +84,11 @@ def get_lmms_version() -> str | None:
             [str(exe), "--version"],
             capture_output=True, text=True, timeout=10,
         )
-        match = re.search(r"(\d+\.\d+(?:\.\d+)?)", out.stdout + out.stderr)
+        match = re.search(
+            r"\bLMMS\s+"
+            r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)",
+            out.stdout + out.stderr,
+        )
         return match.group(1) if match else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -87,6 +112,73 @@ PLUGIN_ALIASES = {
 }
 
 
+def get_lmms_build_options() -> dict[str, bool]:
+    """Return boolean LMMS build options reported by ``--version``."""
+    exe = find_lmms_exe()
+    if exe is None:
+        return {}
+    try:
+        proc = subprocess.run(
+            [str(exe), "--version"], capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return {
+        name.lower(): value.upper() in {"TRUE", "ON", "1"}
+        for name, value in re.findall(
+            r"(?:LMMS_|WANT_)([A-Z0-9_]+)=?'?([A-Z0-9]+)'?", out
+        )
+    }
+
+
+def lmms_supports_carla() -> bool:
+    """Whether LMMS exposes its Carla instrument plugins."""
+    installed = get_installed_plugins()
+    if {"carlarack", "carlapatchbay"} <= installed:
+        return True
+    options = get_lmms_build_options()
+    return options.get("carla", False) or options.get("weakcarla", False)
+
+
+def find_linux_plugins(directory: str | Path, recursive: bool = True) -> list[dict]:
+    """Discover Linux VST3, CLAP, LV2, and LADSPA plugin files/bundles."""
+    root = Path(directory)
+    if not root.is_dir():
+        raise ValueError(f"Directory not found: {directory}")
+    results = []
+    entries = root.rglob("*") if recursive else root.glob("*")
+    seen = set()
+    for path in sorted(entries):
+        if any(parent.suffix.lower() in {".vst3", ".lv2"} for parent in path.parents):
+            continue
+        kind = None
+        if path.is_dir() and path.suffix.lower() == ".vst3":
+            kind = "vst3"
+        elif path.is_file() and path.suffix.lower() == ".clap":
+            kind = "clap"
+        elif path.is_dir() and path.suffix.lower() == ".lv2":
+            kind = "lv2"
+        elif path.is_file() and path.suffix.lower() == ".so":
+            kind = "ladspa"
+        if kind and path not in seen:
+            seen.add(path)
+            item = {"name": path.stem, "path": str(path), "type": kind}
+            if kind == "lv2":
+                ttl_files = list(path.glob("*.ttl"))
+                for ttl in ttl_files:
+                    try:
+                        text = ttl.read_text(errors="ignore")
+                    except OSError:
+                        continue
+                    match = re.search(r"<([^>]+)>\s+a\s+lv2:Plugin", text)
+                    if match:
+                        item["plugin_id"] = match.group(1)
+                        break
+            results.append(item)
+    return results
+
+
 def check_plugin_available(plugin_name: str) -> tuple[bool, str]:
     """Check whether a plugin exists in the installed LMMS.
 
@@ -94,6 +186,8 @@ def check_plugin_available(plugin_name: str) -> tuple[bool, str]:
     everything is considered available (cannot verify).
     """
     name = plugin_name.lower()
+    if name in {"carlarack", "carlapatchbay"} and lmms_supports_carla():
+        return True, "installed"
     if name in STATIC_PLUGINS:
         return True, "built-in"
     installed = get_installed_plugins()

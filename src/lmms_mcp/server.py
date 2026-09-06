@@ -59,6 +59,8 @@ KNOWN_INSTRUMENTS = {
     "gigplayer": "GIG sample library player",
     "bitinvader": "Bit-crushed wavetable synth",
     "vestige": "VST plugin host (Windows only)",
+    "carlarack": "Carla Rack bridge for Linux/macOS plugins",
+    "carlapatchbay": "Carla Patchbay bridge for Linux/macOS plugins",
 }
 
 # Recommended instruments per use case - helps agents pick valid plugins
@@ -96,10 +98,11 @@ Safe choices: tripleoscillator, kicker (drums), lb302 (bass),
 freeboy/nes/sid (chiptune), organic (pads/organ).
 
 Custom plugins: The user may have installed additional LMMS plugins or
-VSTs. Check list_available_plugins for dynamically detected custom
-plugins - they can be used directly by name in add_instrument_track /
-add_effect. For VST .dll files anywhere on disk, use scan_vst_directory
-and add_vst_track.
+ VSTs. Check list_available_plugins for dynamically detected custom
+ plugins. On Linux, use add_carla_instrument_track and load_carla_plugin
+ for installed plugins; Surge XT must use add_surge_xt_track, which targets
+ the working LV2 build. Legacy VST .dll files remain available through
+ scan_vst_directory and add_vst_track.
 
 ZynAddSubFX: For rich sounds, add a track with instrument "zynaddsubfx",
 then load one of ~950 factory presets via load_zyn_preset (browse with
@@ -273,6 +276,10 @@ def add_instrument_track(
         panning: Track panning (-100 to +100, 0=center)
     """
     proj = get_project()
+
+    if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
+        if not lmms_app.lmms_supports_carla():
+            return json.dumps({"error": "Installed LMMS does not expose Carla Rack/Patchbay plugins"})
 
     # Validate instrument name (case-insensitive fuzzy match)
     normalized = instrument.strip().lower()
@@ -770,6 +777,8 @@ def add_effect(
     wet: float = 1.0,
     enabled: bool = True,
     position: int | None = None,
+    plugin_path: str = "",
+    plugin_id: str = "",
 ) -> str:
     """Add an effect to a track's or mixer channel's effect chain.
 
@@ -787,7 +796,8 @@ def add_effect(
     """
     try:
         parent = _resolve_fxchain_target(target_type, target_index)
-        result = effects_mod.add_effect(parent, effect, wet, enabled, position)
+        result = effects_mod.add_effect(parent, effect, wet, enabled, position,
+                                        plugin_path or None, plugin_id or None)
         available, reason = lmms_app.check_plugin_available(effect)
         if not available:
             # Custom effect plugin? (DLL exists but not in known list)
@@ -815,6 +825,40 @@ def add_effect(
             "valid_effects": sorted(effects_mod.KNOWN_EFFECTS.keys()),
             "recommendations": effects_mod.EFFECT_RECOMMENDATIONS,
         })
+
+
+@mcp.tool()
+def add_linux_effect(
+    target_type: str,
+    target_index: int,
+    plugin_type: str,
+    plugin_path: str,
+    plugin_id: str,
+    wet: float = 1.0,
+    enabled: bool = True,
+    position: int | None = None,
+) -> str:
+    """Instantiate an installed LADSPA or LV2 effect in an LMMS chain.
+
+    LADSPA plugin_id is the plugin label; LV2 plugin_id is its URI.
+    """
+    try:
+        parent = _resolve_fxchain_target(target_type, target_index)
+        normalized = plugin_type.strip().lower()
+        if normalized not in {"ladspa", "lv2"}:
+            raise ValueError("plugin_type must be 'ladspa' or 'lv2'")
+        path = Path(plugin_path)
+        if not path.exists():
+            raise ValueError(f"Plugin not found: {plugin_path}")
+        if not plugin_id.strip():
+            raise ValueError("plugin_id is required")
+        host = normalized + "effect"
+        key = {"file": path.stem, "plugin": plugin_id} if normalized == "ladspa" else {"uri": plugin_id}
+        result = effects_mod.add_external_effect(parent, host, key, wet, enabled, position)
+        get_project()._modified = True
+        return json.dumps(result)
+    except (ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)})
 
 
 @mcp.tool()
@@ -1117,6 +1161,8 @@ def list_available_plugins() -> str:
     directly by name in add_instrument_track / add_effect.
     """
     known_inst = set(KNOWN_INSTRUMENTS.keys())
+    if not lmms_app.lmms_supports_carla():
+        known_inst -= {"carlarack", "carlapatchbay"}
     known_eff = set(effects_mod.KNOWN_EFFECTS.keys())
     classified = lmms_app.classify_installed_plugins(known_inst, known_eff)
     exe = lmms_app.find_lmms_exe()
@@ -1126,10 +1172,108 @@ def list_available_plugins() -> str:
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
         "custom_plugins_unknown_type": classified["unknown"],
+        "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
+                              if lmms_app.lmms_supports_carla()],
         "note": "Custom plugins can be used by their DLL name in "
                 "add_instrument_track or add_effect. For VST .dll files "
                 "on disk use add_vst_track instead.",
     }, indent=2)
+
+
+@mcp.tool()
+def scan_linux_plugins(directory: str, recursive: bool = True) -> str:
+    """Discover VST3, CLAP, LV2, and LADSPA plugins on Linux."""
+    try:
+        plugins = lmms_app.find_linux_plugins(directory, recursive)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps({"directory": directory, "count": len(plugins), "plugins": plugins}, indent=2)
+
+
+@mcp.tool()
+def add_carla_instrument_track(
+    name: str,
+    bridge: str = "carlarack",
+    mixer_channel: int = 0,
+    volume: int = 100,
+    panning: int = 0,
+) -> str:
+    """Add an LMMS Carla Rack or Patchbay instrument track."""
+    bridge = bridge.strip().lower()
+    if bridge not in {"carlarack", "carlapatchbay"}:
+        return json.dumps({"error": "bridge must be 'carlarack' or 'carlapatchbay'"})
+    if not lmms_app.lmms_supports_carla():
+        return json.dumps({"error": "Installed LMMS does not expose Carla plugins"})
+    project = get_project()
+    result = project.add_track("instrument", name, instrument=bridge,
+                               mixer_channel=mixer_channel, volume=volume,
+                               panning=panning)
+    if bridge == "carlarack":
+        xml_parser.configure_reference_carla_track(
+            xml_parser.find_track_element(project.root, result["track_index"])
+        )
+    result["bridge"] = bridge
+    return json.dumps(result)
+
+
+@mcp.tool()
+def load_carla_plugin(
+    track_index: int,
+    plugin_path: str,
+    plugin_id: str = "",
+) -> str:
+    """Load an installed VST3, CLAP, or LV2 plugin into a Carla track.
+
+    Surge XT is intentionally LV2-only on this Linux installation; use
+    add_surge_xt_track so its reference Carla state is embedded.
+    """
+    try:
+        result = xml_parser.load_carla_plugin(get_project().root, track_index,
+                                              plugin_path, plugin_id)
+        get_project()._modified = True
+        return json.dumps(result)
+    except (ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+def add_surge_xt_track(
+    name: str = "Surge XT",
+    lv2_path: str = "/usr/lib/lv2/Surge XT.lv2",
+    mixer_channel: int = 0,
+    volume: int = 100,
+    panning: int = 0,
+) -> str:
+    """Add a Carla Rack track using the working Surge XT LV2 serialization.
+
+    The generated project uses the exact URI and Carla state from the known
+    working LMMS project. CLAP and VST3 Surge builds are not accepted.
+    """
+    path = Path(lv2_path)
+    if not path.is_dir() or path.suffix.lower() != ".lv2":
+        return json.dumps({"error": f"Surge XT LV2 bundle not found: {lv2_path}"})
+    if not lmms_app.lmms_supports_carla():
+        return json.dumps({"error": "Installed LMMS does not expose Carla plugins"})
+    project = get_project()
+    result = project.add_track(
+        "instrument", name, instrument="carlarack",
+        mixer_channel=mixer_channel, volume=volume, panning=panning,
+    )
+    xml_parser.configure_reference_carla_track(
+        xml_parser.find_track_element(project.root, result["track_index"])
+    )
+    try:
+        loaded = xml_parser.load_carla_plugin(
+            project.root, result["track_index"], path,
+            xml_parser.SURGE_XT_LV2_URI,
+        )
+    except (ValueError, OSError, RuntimeError) as exc:
+        return json.dumps({"error": str(exc)})
+    project._modified = True
+    result.update({"bridge": "carlarack", "plugin": loaded["plugin"],
+                   "plugin_type": loaded["plugin_type"],
+                   "plugin_id": loaded["plugin_id"]})
+    return json.dumps(result)
 
 
 @mcp.tool()

@@ -55,6 +55,24 @@ class TestXMLParser:
         assert head is not None
         assert head.get("bpm") == "120"
 
+    def test_create_empty_project_uses_installed_lmms_version(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        monkeypatch.setattr(lmms_app, "get_lmms_version", lambda: "1.3.0-alpha.1.1034")
+        root = create_empty_project()
+
+        assert root.get("creatorversion") == "1.3.0-alpha.1.1034"
+        assert root.get("version") == "31"
+
+    def test_create_empty_project_falls_back_without_lmms(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        monkeypatch.setattr(lmms_app, "get_lmms_version", lambda: None)
+        root = create_empty_project()
+
+        assert root.get("creatorversion") == "1.2.0"
+        assert root.get("version") == "31"
+
     def test_save_load_roundtrip(self):
         root = create_empty_project(bpm=150)
         with tempfile.NamedTemporaryFile(suffix=".mmpz", delete=False) as f:
@@ -544,6 +562,18 @@ class TestLmmsApp:
             pytest.skip("LMMS not installed")
         assert exe.is_file()
 
+    def test_get_lmms_version_preserves_prerelease_and_build(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        class Completed:
+            stdout = "LMMS 1.3.0-alpha.1.1034+4e677cb\n"
+            stderr = ""
+
+        monkeypatch.setattr(lmms_app, "find_lmms_exe", lambda: Path("/fake/lmms"))
+        monkeypatch.setattr(lmms_app.subprocess, "run", lambda *args, **kwargs: Completed())
+
+        assert lmms_app.get_lmms_version() == "1.3.0-alpha.1.1034+4e677cb"
+
     def test_check_plugin_known_builtin(self):
         from lmms_mcp import lmms_app
         ok, _ = lmms_app.check_plugin_available("tripleoscillator")
@@ -671,6 +701,99 @@ class TestCustomPluginsAndVst:
             srv.add_vst_track("VST", "Z:/nonexistent/plugin.dll")
         )
         assert "error" in response
+
+    def test_find_linux_plugins(self):
+        from lmms_mcp import lmms_app
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Surge XT.vst3").mkdir()
+            (root / "Surge XT.clap").write_bytes(b"plugin")
+            (root / "lsp.lv2").mkdir()
+            (root / "ZamComp.so").write_bytes(b"plugin")
+            found = lmms_app.find_linux_plugins(root)
+            assert {p["type"] for p in found} == {"vst3", "clap", "lv2", "ladspa"}
+
+    def test_carla_track_and_surge_lv2_round_trip(self):
+        from lmms_mcp import server as srv
+        from lmms_mcp.project import LMMSProject
+        from lmms_mcp import xml_parser
+        proj = LMMSProject()
+        proj.new()
+        srv.set_project(proj)
+        if not srv.lmms_app.lmms_supports_carla():
+            pytest.skip("LMMS build does not expose Carla")
+        lv2 = Path("/usr/lib/lv2/Surge XT.lv2")
+        if not lv2.is_dir():
+            pytest.skip("Surge XT LV2 not installed")
+        response = json.loads(srv.add_surge_xt_track("Surge", str(lv2)))
+        assert response["bridge"] == "carlarack"
+        assert response["plugin_type"] == "LV2"
+        assert response["plugin_id"] == xml_parser.SURGE_XT_LV2_URI
+        state = find_tracks(proj.root)[0].find("instrumenttrack/instrument/carlarack/CARLA-PROJECT")
+        assert state.get("VERSION") == "2.5"
+        assert state.findtext("Plugin/Info/Type") == "LV2"
+        assert state.findtext("Plugin/Info/Name") == "Surge XT"
+        assert state.findtext("Plugin/Info/URI") == xml_parser.SURGE_XT_LV2_URI
+        assert state.findtext("Plugin/Data/Active") == "Yes"
+        assert state.findtext("Plugin/Data/ControlChannel") == "1"
+        assert state.findtext("Plugin/Data/Options") == "0x3f1"
+        assert state.findtext("Plugin/Data/CustomData/Key").endswith(":StateString")
+        assert len(state.findtext("Plugin/Data/CustomData/Value")) > 70000
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "carla.mmp"
+            proj.add_note(0, key=60, pos=0, length=96)
+            proj.save(path, compressed=False)
+            loaded = xml_parser.load_project(path)
+            assert loaded.find(".//CARLA-PROJECT/Plugin/Info/Type").text == "LV2"
+            assert loaded.find(".//CARLA-PROJECT/Plugin/Info/URI").text == xml_parser.SURGE_XT_LV2_URI
+            assert loaded.find(".//track[@name='Surge']/pattern/note").get("key") == "60"
+
+    def test_carla_rejects_unknown_plugin_identifier(self):
+        from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
+        import tempfile
+        root = create_empty_project()
+        add_instrument_track(root, "Carla", instrument="carlarack")
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / "unknown.vst3"
+            plugin.mkdir()
+            with pytest.raises(ValueError, match="identifier is required"):
+                load_carla_plugin(root, 0, plugin)
+
+    def test_carla_rejects_surge_vst3_and_clap(self):
+        from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
+        root = create_empty_project()
+        add_instrument_track(root, "Carla", instrument="carlarack")
+        with tempfile.TemporaryDirectory() as tmp:
+            vst3 = Path(tmp) / "Surge XT.vst3"
+            vst3.mkdir()
+            clap = Path(tmp) / "Surge XT.clap"
+            clap.write_bytes(b"plugin")
+            for plugin in (vst3, clap):
+                with pytest.raises(ValueError, match="must use.*LV2"):
+                    load_carla_plugin(root, 0, plugin)
+
+    def test_carla_regression_fixture_contains_reference_state_and_note(self):
+        from lmms_mcp import xml_parser
+        fixture = Path(__file__).parent / "fixtures" / "carla_surge_regression.mmp"
+        root = xml_parser.load_project(fixture)
+        state = root.find(".//CARLA-PROJECT")
+        assert state.get("VERSION") == "2.5"
+        assert state.findtext("Plugin/Info/URI") == xml_parser.SURGE_XT_LV2_URI
+        assert state.findtext("Plugin/Data/CustomData/Key") == (
+            f"{xml_parser.SURGE_XT_LV2_URI}:StateString"
+        )
+        assert root.find(".//track[@name='Carla Surge']/pattern/note").get("key") == "60"
+
+    def test_linux_effect_serialization(self):
+        from lmms_mcp.effects import add_external_effect
+        root = create_empty_project()
+        add_instrument_track(root, "Lead")
+        track = find_tracks(root)[0].find("instrumenttrack")
+        add_external_effect(track, "ladspaeffect", {"file": "ZamComp", "plugin": "ZamComp"})
+        effect = track.find("fxchain/effect")
+        assert effect.get("name") == "ladspaeffect"
+        assert effect.find("key/attribute[@name='file']").get("value") == "ZamComp"
 
 
 class TestSilenceRegressions:

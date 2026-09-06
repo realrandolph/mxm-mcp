@@ -5,6 +5,7 @@ manipulate fxchain elements on tracks and mixer channels.
 """
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 # Built-in LMMS effects: plugin name -> (description, controls node name).
 # Names verified against LMMS source (plugin descriptors + nodeName()).
@@ -34,7 +35,7 @@ KNOWN_EFFECTS = {
 EXTERNAL_EFFECTS = {
     "ladspaeffect": "LADSPA plugin host (depends on installed LADSPA libs)",
     "lv2effect": "LV2 plugin host (depends on installed LV2 plugins)",
-    "vsteffect": "VST plugin host (Windows/macOS, requires VST DLLs)",
+    "vsteffect": "VST plugin host (requires a compatible VST)",
 }
 
 # Recommended effects per use case
@@ -63,6 +64,8 @@ def add_effect(
     wet: float = 1.0,
     enabled: bool = True,
     position: int | None = None,
+    plugin_path: str | None = None,
+    plugin_id: str | None = None,
 ) -> dict:
     """Add an effect to a fxchain element.
 
@@ -80,6 +83,14 @@ def add_effect(
         ValueError: If effect name is unknown.
     """
     normalized = effect_name.strip().lower()
+    if normalized in {"ladspaeffect", "lv2effect"}:
+        if not plugin_path or not plugin_id:
+            raise ValueError(f"{normalized} requires plugin_path and plugin_id")
+        key_attrs = ({"file": Path(plugin_path).stem, "plugin": plugin_id}
+                     if normalized == "ladspaeffect" else {"uri": plugin_id})
+        if normalized == "lv2effect" and not plugin_id.startswith(("http://", "https://")):
+            raise ValueError("lv2effect plugin_id must be an LV2 URI")
+        return add_external_effect(parent, normalized, key_attrs, wet, enabled, position)
     if normalized not in KNOWN_EFFECTS:
         if normalized in EXTERNAL_EFFECTS:
             raise ValueError(
@@ -134,6 +145,42 @@ def add_effect(
         "message": f"Added {normalized} at position {final_pos} "
                    f"(chain now has {num} effects)",
     }
+
+
+def add_external_effect(
+    parent: ET.Element,
+    effect_name: str,
+    key_attrs: dict[str, str],
+    wet: float = 1.0,
+    enabled: bool = True,
+    position: int | None = None,
+) -> dict:
+    """Add a LADSPA/LV2 host effect using LMMS's serialized sub-plugin key."""
+    normalized = effect_name.strip().lower()
+    if normalized not in {"ladspaeffect", "lv2effect"}:
+        raise ValueError("Only ladspaeffect and lv2effect are external effects")
+    fxchain = get_fxchain(parent)
+    effect = ET.Element("effect", {
+        "name": normalized,
+        "autoquit": "1",
+        "autoquit_denominator": "4",
+        "autoquit_numerator": "4",
+        "syncmode": "0",
+    })
+    ET.SubElement(effect, "on", {"value": "1" if enabled else "0"})
+    ET.SubElement(effect, "wet", {"value": str(wet)})
+    key = ET.SubElement(effect, "key")
+    for name, value in key_attrs.items():
+        ET.SubElement(key, "attribute", {"name": name, "value": str(value)})
+    if position is None or position >= len(fxchain.findall("effect")):
+        fxchain.append(effect)
+        final_pos = len(fxchain.findall("effect")) - 1
+    else:
+        fxchain.insert(position, effect)
+        final_pos = max(0, position)
+    fxchain.set("numofeffects", str(len(fxchain.findall("effect"))))
+    fxchain.set("enabled", "1")
+    return {"effect": normalized, "position": final_pos, "chain_size": len(fxchain.findall("effect")), "plugin": key_attrs}
 
 
 def remove_effect(parent: ET.Element, identifier: str | int) -> dict:
