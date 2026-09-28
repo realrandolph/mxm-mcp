@@ -39,11 +39,17 @@ SURGE_CID = "ABCDEF019182FAEB566D624153675854"
 
 
 @pytest.fixture(autouse=True)
-def _clear_mxm_build_options_cache():
-    """Keep the cached MXM ``--version`` result from leaking between tests."""
+def _isolate_mxm_build_options(monkeypatch):
+    """Keep the cached MXM ``--version`` result from leaking between tests.
+
+    Also stubs the executable lookup to ``None`` so the fixture does not spawn
+    the real MXM binary for every test; tests that exercise caching override
+    this in their own body.
+    """
     from lmms_mcp import lmms_app
 
     lmms_app.clear_mxm_build_options_cache()
+    monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: None)
     yield
     lmms_app.clear_mxm_build_options_cache()
 
@@ -253,6 +259,33 @@ class TestVst3Discovery:
 
         names = {path.name for path in vst3.find_vst3_bundles()}
         assert names == {"lower.vst3"}
+
+    def test_standard_scan_extension_match_is_case_sensitive(
+        self, tmp_path, monkeypatch
+    ):
+        # Pins _collect_bundles, used for the standard locations.
+        standard = tmp_path / "standard"
+        standard.mkdir()
+        (standard / "lower.vst3").mkdir()
+        (standard / "upper.VST3").mkdir()
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [standard])
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        monkeypatch.delenv("VST3_PATH", raising=False)
+
+        names = {path.name for path in vst3.find_vst3_bundles()}
+        assert names == {"lower.vst3"}
+
+    def test_direct_vst3_path_match_is_case_sensitive(self, tmp_path, monkeypatch):
+        # Pins _add_bundles_from_path for an explicit bundle path.
+        lower = tmp_path / "Lower.vst3"
+        lower.mkdir()
+        upper = tmp_path / "Upper.VST3"
+        upper.mkdir()
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.setenv("VST3_PATH", os.pathsep.join([str(lower), str(upper)]))
+
+        found = vst3.find_vst3_bundles()
+        assert found == [lower]
 
     def test_relative_vst3_path_is_made_absolute(self, tmp_path, monkeypatch):
         (tmp_path / "sub").mkdir()
