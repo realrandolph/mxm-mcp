@@ -1432,11 +1432,10 @@ def add_talking_bass_track(
 def list_vst3_instruments(include_effects: bool = False) -> str:
     """List native VST3 plugins for MXM's built-in VST3 host (not Carla).
 
-    Reads each module's real class id from the same locations MXM scans
+    Reads each module's real class id from the locations MXM scans
     (``$HOME/.vst3``, ``/usr/lib*/vst3``, ``/usr/local/lib*/vst3``, MXM's app
-    ``vst3`` dir, ``VST3_PATH``). Pass a plugin's ``module`` + ``cid`` to
-    add_vst3_instrument_track. Discovery is Linux-only in this MCP (MXM builds
-    its VST3 host for all supported platforms).
+    ``vst3`` dir, ``VST3_PATH``), per platform. Pass a plugin's ``module`` +
+    ``cid`` to add_vst3_instrument_track.
 
     Args:
         include_effects: Also list VST3 effects (default: instruments only)
@@ -1457,8 +1456,8 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
         "plugins": plugins if include_effects else instruments,
     }
     if not payload["discovery_supported"]:
-        payload["warning"] = ("This MCP can only discover native VST3 plugins "
-                              "on Linux; pass module_path + cid with "
+        payload["warning"] = ("This MCP cannot discover native VST3 plugins on "
+                              "this platform; pass module_path + cid with "
                               "allow_unverified.")
     return json.dumps(payload, indent=2)
 
@@ -1515,10 +1514,10 @@ def add_vst3_instrument_track(
                          "(see list_vst3_instruments).",
             })
         if allow_unverified:
-            # No verification requested: skip the per-bundle discovery sweep.
+            # No verification requested: skip the per-bundle discovery sweep and
+            # echo only what the caller supplied (no synthesized name/vendor).
             verified = False
             descriptor = {
-                "name": Path(module_path).stem, "vendor": "",
                 "module": os.path.abspath(module_path.strip()),
                 "cid": vst3_mod.normalize_cid(cid),
             }
@@ -1571,22 +1570,25 @@ def add_vst3_instrument_track(
 
     result.update({
         "host": xml_parser.NATIVE_VST3_HOST, "plugin": descriptor["module"],
-        "plugin_name": descriptor.get("name", ""),
-        "vendor": descriptor.get("vendor", ""), "plugin_type": "VST3",
+        "plugin_name": descriptor.get("name") or None,
+        "vendor": descriptor.get("vendor") or None, "plugin_type": "VST3",
         "native": True, "carla": False, "cid": descriptor["cid"],
         "verified": verified,
     })
+    warnings = []
+    if not verified:
+        warnings.append("module_path/cid not verified against installed plugins")
     if not vst3_mod.native_vst3_discovery_supported():
-        result["warning"] = ("This MCP can only discover native VST3 plugins "
-                             "on Linux; MXM builds its VST3 host for all "
-                             "supported platforms.")
-    elif not Path(descriptor["module"]).is_dir():
-        result["warning"] = f"VST3 module not found on disk: {descriptor['module']}"
-    elif not lmms_app.mxm_supports_native_vst3():
-        result["warning"] = "Installed MXM was not detected with native VST3 support."
+        warnings.append("this MCP cannot discover native VST3 plugins here")
+    if not Path(descriptor["module"]).exists():
+        warnings.append(f"module not found on disk: {descriptor['module']}")
+    if not lmms_app.mxm_supports_native_vst3():
+        warnings.append("installed MXM was not detected with native VST3 support")
+    if warnings:
+        result["warning"] = "; ".join(warnings)
     result["message"] = (
         f"Added native VST3 track '{name}' at index {idx} "
-        f"({descriptor.get('name', descriptor['module'])})"
+        f"({descriptor.get('name') or descriptor['module']})"
     )
     return json.dumps(result)
 

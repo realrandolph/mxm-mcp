@@ -201,12 +201,13 @@ automatically and can be used directly by name - no server update needed.
 `add_vst3_instrument_track` with its `module` path and 32-character `cid`.
 This is MXM's own host, never routed through Carla.
 
-Discovery scans the same locations as MXM (`$HOME/.vst3`, `/usr/lib*/vst3`,
-`/usr/local/lib*/vst3`, MXM's app `vst3` dir, `$VST3_PATH`), recursively and
-with absolute paths. `MXM_VST3_PATH_ONLY` (any value) restricts it to
-`$VST3_PATH`. MXM builds its VST3 host for all supported platforms, but this
-MCP's discovery/probe implements the Linux bundle layout only; elsewhere,
-author with explicit `module_path` + `cid` and `allow_unverified=True`.
+Discovery follows MXM's per-platform search locations (Linux, Windows and
+macOS bundle layouts) plus `$VST3_PATH`, recursively and with absolute paths.
+`MXM_VST3_PATH_ONLY` (any value) restricts it to `$VST3_PATH`. Class ids and
+factory interface ids use the platform's VST3 byte order (COM/GUID order on
+Windows), and class names are read through `IPluginFactory3` so non-ASCII
+names survive. MXM currently compiles its VST3 host for Linux and Windows;
+`host_available` reports whether the installed binary actually has it.
 
 ### Utilities
 

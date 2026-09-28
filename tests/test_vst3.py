@@ -7,9 +7,9 @@ render check lives in ``test_lmms13_integration.py``.
 
 import json
 import os
+import platform
 import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from lmms_mcp import vst3, vst3_probe, xml_parser
+from lmms_mcp import vst3_platform as plat
 from lmms_mcp import server as srv
 from lmms_mcp.project import LMMSProject
 from lmms_mcp.xml_parser import (
@@ -29,6 +30,7 @@ SURGE_MODULE = "/usr/lib/vst3/Surge XT.vst3"
 SURGE_CID = "ABCDEF019182FAEB566D624153675854"
 CID_A, CID_B = "AB" * 16, "CD" * 16
 FAKE_CID = "A1B2C3D4E5F60718293A4B4C00000000"
+UNICODE_NAME = "テストシンセ"
 
 
 @pytest.fixture(autouse=True)
@@ -214,11 +216,10 @@ class TestVst3Discovery:
                 "sub_categories": "Instrument|Synth", "vendor": "V", "version": "1",
                 "class_flags": 0}]}
 
-        monkeypatch.setattr(vst3.sys, "platform", "win32")
-        assert vst3.native_vst3_discovery_supported() is False
+        monkeypatch.setattr(vst3, "native_vst3_discovery_supported", lambda: False)
         assert vst3.discover_vst3_plugins(
             bundles=[Path("/x.vst3")], probe=fake_probe) == []
-        monkeypatch.setattr(vst3.sys, "platform", "linux")
+        monkeypatch.setattr(vst3, "native_vst3_discovery_supported", lambda: True)
         assert len(vst3.discover_vst3_plugins(
             bundles=[Path("/x.vst3")], probe=fake_probe)) == 1
 
@@ -302,6 +303,69 @@ class TestMxmBuildOptionsCache:
         assert second["have_vst3"] is True and second.get("vst3") is True
         assert len(calls) == 1
 
+    def test_support_requires_compiled_host_not_want(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        monkeypatch.setattr(lmms_app, "get_mxm_build_options",
+                            lambda: {"vst3": True, "have_vst3": False})
+        assert lmms_app.mxm_supports_native_vst3() is False
+        monkeypatch.setattr(lmms_app, "get_mxm_build_options",
+                            lambda: {"have_vst3": True})
+        assert lmms_app.mxm_supports_native_vst3() is True
+
+
+class TestVst3Platform:
+    """The per-platform byte order / bundle layout table shared with the probe."""
+
+    def test_cid_and_iid_byte_order(self, monkeypatch):
+        raw = bytes.fromhex("0007B650F24B4C0BA464EDB9F00B2ABB")
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        assert plat.iid_bytes("factory2") == raw
+        assert plat.format_cid(raw) == raw.hex().upper()
+        monkeypatch.setattr(plat, "WINDOWS", True)
+        # Windows uses the COM/GUID layout: the first three fields reversed.
+        assert plat.iid_bytes("factory2").hex().upper() == "50B607004BF20B4CA464EDB9F00B2ABB"
+        assert plat.format_cid(raw) == "50B607004BF20B4CA464EDB9F00B2ABB"
+
+    def test_discovery_supported_by_platform(self, monkeypatch):
+        for flags in ((True, False, False), (False, True, False), (False, False, True)):
+            for name, value in zip(("LINUX", "WINDOWS", "MACOS"), flags):
+                monkeypatch.setattr(plat, name, value)
+            assert vst3.native_vst3_discovery_supported() is True
+        monkeypatch.setattr(plat, "LINUX", False)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        monkeypatch.setattr(plat, "MACOS", False)
+        assert vst3.native_vst3_discovery_supported() is False
+
+    def test_bundle_layouts(self, monkeypatch, tmp_path):
+        bundle = tmp_path / "Surge XT.vst3"
+        monkeypatch.setattr(plat, "MACOS", False)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        assert plat.bundle_binaries(bundle) == [
+            bundle / "Contents" / f"{platform.machine()}-linux" / "Surge XT.so"]
+        monkeypatch.setattr(plat, "WINDOWS", True)
+        assert (bundle / "Contents" / "x86_64-win" / "Surge XT.vst3") in plat.bundle_binaries(bundle)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        monkeypatch.setattr(plat, "MACOS", True)
+        assert plat.bundle_binaries(bundle) == [bundle / "Contents" / "MacOS" / "Surge XT"]
+
+    def test_app_dir_layouts(self, monkeypatch, tmp_path):
+        exe = tmp_path / "bin" / "mxm"
+        (tmp_path / "bin" / "vst3").mkdir(parents=True)
+        monkeypatch.setattr(plat, "MACOS", False)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        assert plat.app_dir_for_exe(exe) == tmp_path / "bin" / "vst3"
+        (tmp_path / "bin" / "VST3").mkdir()
+        monkeypatch.setattr(plat, "WINDOWS", True)
+        assert plat.app_dir_for_exe(exe) == tmp_path / "bin" / "VST3"
+        app = tmp_path / "MXM.app"
+        (app / "Contents" / "MacOS").mkdir(parents=True)
+        (app / "Contents" / "VST3").mkdir()
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        monkeypatch.setattr(plat, "MACOS", True)
+        assert plat.app_dir_for_exe(app / "Contents" / "MacOS" / "mxm") == (
+            app / "Contents" / "VST3")
+
 
 class TestVst3ServerTools:
     def _patch(self, monkeypatch, plugins):
@@ -331,6 +395,7 @@ class TestVst3ServerTools:
         assert result["host"] == "vst3instrument" and result["verified"] is True
         assert result["native"] is True and result["carla"] is False
         assert result["plugin_type"] == "VST3" and result["cid"] == SURGE_CID
+        assert result["plugin_name"] == "Surge XT" and result["vendor"] == "Vendor"
         instrument = project.root.find(".//instrument[@name='vst3instrument']")
         assert _key_attributes(instrument) == {"module": SURGE_MODULE, "cid": SURGE_CID}
         assert project.root.find(".//instrument[@name='carlarack']") is None
@@ -351,6 +416,10 @@ class TestVst3ServerTools:
         accepted = json.loads(srv.add_vst3_instrument_track(
             "Pad", module_path=SURGE_MODULE, cid=SURGE_CID, allow_unverified=True))
         assert accepted["host"] == "vst3instrument" and accepted["verified"] is False
+        # Nothing is synthesized for an unverified identity.
+        assert accepted["plugin_name"] is None and accepted["vendor"] is None
+        assert "not verified" in accepted["warning"]
+        assert accepted["message"].startswith("Added native VST3 track 'Pad'")
 
     def test_named_and_verified_paths_still_discover(self, monkeypatch):
         calls = []
@@ -403,20 +472,47 @@ class TestVst3ServerTools:
         assert "add_vst3_instrument_track" in response["error"]
 
 
+def _cpp_bytes(data: bytes) -> str:
+    return ",".join(f"0x{byte:02X}" for byte in data)
+
+
+def _cpp_utf16(text: str) -> str:
+    raw = text.encode("utf-16-le")
+    return ",".join(f"0x{int.from_bytes(raw[i:i + 2], 'little'):04X}"
+                    for i in range(0, len(raw), 2))
+
+
+# A stub IPluginFactory3 (a superset of v1/v2) with both class-info paths and a
+# UTF-16 name. The interface ids are generated with the host's byte order, so
+# this also exercises queryInterface on Windows.
 _FAKE_MODULE_C = textwrap.dedent(r"""
     #include <stdint.h>
     #include <string.h>
     typedef struct { uint8_t cid[16]; int32_t cardinality; char category[32];
         char name[64]; uint32_t class_flags; char sub_categories[128];
         char vendor[64]; char version[64]; char sdk_version[64]; } PClassInfo2;
-    typedef struct FactoryVtbl { int32_t (*queryInterface)(void*,const char*,void**);
+    typedef struct { uint8_t cid[16]; int32_t cardinality; char category[32];
+        uint16_t name[64]; uint32_t class_flags; char sub_categories[128];
+        uint16_t vendor[64]; uint16_t version[64]; uint16_t sdk_version[64]; } PClassInfoW;
+    typedef struct FactoryVtbl {
+        int32_t (*queryInterface)(void*,const char*,void**);
         uint32_t (*addRef)(void*); uint32_t (*release)(void*);
         int32_t (*getFactoryInfo)(void*,void*); int32_t (*countClasses)(void*);
         int32_t (*getClassInfo)(void*,int32_t,void*);
         int32_t (*createInstance)(void*,const char*,const char*,void**);
-        int32_t (*getClassInfo2)(void*,int32_t,PClassInfo2*); } FactoryVtbl;
+        int32_t (*getClassInfo2)(void*,int32_t,PClassInfo2*);
+        int32_t (*getClassInfoUnicode)(void*,int32_t,PClassInfoW*);
+        int32_t (*setHostContext)(void*,void*); } FactoryVtbl;
     typedef struct { const FactoryVtbl* vtbl; } Factory;
-    static int32_t f_query(void* s,const char* i,void** o){(void)i;*o=s;return 0;}
+    static const uint8_t k_iid2[16] = {%(iid2)s};
+    static const uint8_t k_iid3[16] = {%(iid3)s};
+    static const uint16_t k_uname[] = {%(uname)s,0};
+    static void fill_cid(uint8_t* cid){
+        static const uint8_t c[16]={0xA1,0xB2,0xC3,0xD4,0xE5,0xF6,0x07,0x18,0x29,0x3A,0x4B,0x4C};
+        memcpy(cid,c,16);}
+    static int32_t f_query(void* s,const char* i,void** o){
+        if(memcmp(i,k_iid2,16)==0 || memcmp(i,k_iid3,16)==0){*o=s;return 0;}
+        *o=0; return -1;}
     static uint32_t f_addref(void* s){(void)s;return 1;}
     static uint32_t f_release(void* s){(void)s;return 0;}
     static int32_t f_info(void* s,void* i){(void)s;memset(i,0,452);
@@ -426,28 +522,39 @@ _FAKE_MODULE_C = textwrap.dedent(r"""
     static int32_t f_create(void* s,const char* c,const char* i,void** o){
         (void)s;(void)c;(void)i;(void)o;return 1;}
     static int32_t f_get2(void* s,int32_t i,PClassInfo2* p){
-        static const uint8_t cid[16]={0xA1,0xB2,0xC3,0xD4,0xE5,0xF6,0x07,0x18,0x29,0x3A,0x4B,0x4C};
         (void)s; if(i!=0) return 1; memset(p,0,sizeof(*p));
-        memcpy(p->cid,cid,16); p->cardinality=0x7FFFFFFF;
+        fill_cid(p->cid); p->cardinality=0x7FFFFFFF;
         strcpy(p->category,"Audio Module Class"); strcpy(p->name,"Fake Synth");
         strcpy(p->sub_categories,"Instrument|Synth"); strcpy(p->vendor,"Fake Vendor");
         strcpy(p->version,"1.2.3"); strcpy(p->sdk_version,"VST 3.7"); return 0;}
-    static const FactoryVtbl g_vtbl={f_query,f_addref,f_release,f_info,f_count,f_get,f_create,f_get2};
+    static int32_t f_getu(void* s,int32_t i,PClassInfoW* p){
+        (void)s; if(i!=0) return 1; memset(p,0,sizeof(*p));
+        fill_cid(p->cid); p->cardinality=0x7FFFFFFF;
+        strcpy(p->category,"Audio Module Class"); memcpy(p->name,k_uname,sizeof(k_uname));
+        strcpy(p->sub_categories,"Instrument|Synth"); memcpy(p->vendor,k_uname,sizeof(k_uname));
+        memcpy(p->version,k_uname,sizeof(k_uname)); return 0;}
+    static int32_t f_sethost(void* s,void* c){(void)s;(void)c;return 0;}
+    static const FactoryVtbl g_vtbl={f_query,f_addref,f_release,f_info,f_count,f_get,
+        f_create,f_get2,f_getu,f_sethost};
     static Factory g_factory={&g_vtbl};
     int ModuleEntry(void* h){(void)h;return 1;}
     int ModuleExit(void){return 1;}
     Factory* GetPluginFactory(void){return &g_factory;}
-""").strip()
+""").strip() % {
+    "iid2": _cpp_bytes(plat.iid_bytes("factory2")),
+    "iid3": _cpp_bytes(plat.iid_bytes("factory3")),
+    "uname": _cpp_utf16(UNICODE_NAME),
+}
 
 
 def _build_fake_bundle(tmp_path):
     """Compile a minimal VST3 module so the ctypes probe can be tested."""
-    if not sys.platform.startswith("linux"):
-        pytest.skip("native VST3 discovery is Linux-only in this MCP")
+    if not plat.LINUX:
+        pytest.skip("the compiled stub uses the Linux bundle layout")
     compiler = shutil.which("cc") or shutil.which("gcc")
     if compiler is None:
         pytest.skip("no C compiler available to build a stub VST3 module")
-    so_dir = tmp_path / "Fake.vst3" / "Contents" / f"{os.uname().machine}-linux"
+    so_dir = tmp_path / "Fake.vst3" / "Contents" / f"{platform.machine()}-linux"
     so_dir.mkdir(parents=True)
     source = tmp_path / "fake_module.c"
     source.write_text(_FAKE_MODULE_C)
@@ -462,13 +569,16 @@ def _build_fake_bundle(tmp_path):
 class TestVst3ProbeCtypes:
     """Deterministic coverage for the riskiest code in vst3_probe.py."""
 
-    def test_bundle_so_path(self, tmp_path):
+    def test_bundle_binary(self, tmp_path):
         bundle = tmp_path / "X.vst3"
-        binary = bundle / "Contents" / f"{os.uname().machine}-linux" / "X.so"
+        binary = bundle / "Contents" / f"{platform.machine()}-linux" / "X.so"
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"")
-        assert vst3_probe.vst3_bundle_so_path(bundle) == binary
-        assert vst3_probe.vst3_bundle_so_path(tmp_path / "Empty.vst3") is None
+        assert vst3_probe.bundle_binary(bundle) == binary
+        assert vst3_probe.bundle_binary(tmp_path / "Empty.vst3") is None
+        bare = tmp_path / "Bare.vst3"
+        bare.write_bytes(b"")
+        assert vst3_probe.bundle_binary(bare) == bare
 
     def test_probe_reports_missing_binary(self, tmp_path):
         (tmp_path / "Empty.vst3").mkdir()
@@ -480,16 +590,18 @@ class TestVst3ProbeCtypes:
         info = result["classes"][0]
         # Trailing zero bytes must be preserved (regression guard).
         assert info["cid"] == FAKE_CID
-        assert info["name"] == "Fake Synth"
+        # Prefers IPluginFactory3's UTF-16 info over the ASCII getClassInfo2.
+        assert info["name"] == UNICODE_NAME
+        assert info["vendor"] == UNICODE_NAME and info["version"] == UNICODE_NAME
         assert info["category"] == "Audio Module Class"
         assert info["sub_categories"] == "Instrument|Synth"
-        assert info["vendor"] == "Fake Vendor" and info["version"] == "1.2.3"
 
     def test_stub_module_flows_through_discovery_and_main(self, tmp_path, capsys):
         bundle = _build_fake_bundle(tmp_path)
         plugins = vst3.discover_vst3_plugins(bundles=[bundle], probe=vst3_probe.probe_bundle)
         assert len(plugins) == 1 and plugins[0]["is_instrument"] is True
         assert plugins[0]["cid"] == FAKE_CID and plugins[0]["module"] == str(bundle)
+        assert plugins[0]["name"] == UNICODE_NAME
         assert vst3_probe.main([str(bundle)]) == 0
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        assert payload["classes"][0]["name"] == "Fake Synth"
+        assert payload["classes"][0]["name"] == UNICODE_NAME

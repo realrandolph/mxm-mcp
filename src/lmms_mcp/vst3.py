@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from . import lmms_app
+from . import vst3_platform as plat
 
 #! MXM enables path-only mode on mere presence (std::getenv), so test for the
 #! key, not its truthiness.
@@ -28,8 +29,8 @@ _CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 
 def native_vst3_discovery_supported() -> bool:
-    """Whether this MCP can discover VST3 plugins here (Linux-only today)."""
-    return sys.platform.startswith("linux")
+    """Whether this MCP can discover and introspect VST3 plugins here."""
+    return plat.discovery_supported()
 
 
 def path_only_enabled() -> bool:
@@ -45,21 +46,14 @@ def normalize_cid(cid: str) -> str:
 
 
 def _app_vst3_dir() -> Path | None:
-    """Application ``vst3`` dir, resolved like MXM's ``/proc/<pid>/exe``."""
+    """Application ``vst3`` dir, resolved like MXM's app-level scan."""
     exe = lmms_app.find_mxm_exe() or lmms_app.find_lmms_exe()
-    if exe is None:
-        return None
-    candidate = Path(os.path.realpath(exe)).parent / "vst3"
-    return candidate if candidate.is_dir() else None
+    return plat.app_dir_for_exe(exe)
 
 
 def standard_vst3_dirs() -> list[Path]:
-    """Standard ``.vst3`` locations, in MXM's order."""
-    dirs = [Path(home) / ".vst3" for home in (os.environ.get("HOME"),) if home]
-    for base in (Path("/usr"), Path("/usr/local")):
-        dirs += [base / "lib64" / "vst3", base / "lib" / "vst3"]
-    app = _app_vst3_dir()
-    return dirs + [app] if app else dirs
+    """Standard ``.vst3`` locations, in MXM's order (per platform)."""
+    return plat.standard_dirs(_app_vst3_dir())
 
 
 def _vst3_path_entries(raw: str) -> list[str]:
