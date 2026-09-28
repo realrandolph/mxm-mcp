@@ -1,7 +1,7 @@
 """ZynAddSubFX preset (.xiz) discovery and loading.
 
 .xiz files are gzip-compressed XML documents with a <ZynAddSubFX-data>
-root element. LMMS ships ~950 presets in data/presets/ZynAddSubFX.
+root element. MXM ships ~950 presets in presets/ZynAddSubFX.
 """
 
 import gzip
@@ -11,14 +11,22 @@ from pathlib import Path
 PRESET_EXTENSIONS = {".xiz"}
 
 # Candidate locations scanned in order; first existing directory wins.
-# Can be overridden with the LMMS_PRESETS_DIR environment variable
-# (points directly at the ZynAddSubFX folder or its parent presets dir).
+# These are MXM's per-user and system data dirs. Can be overridden with
+# the MXM_PRESETS_DIR environment variable (points directly at the
+# ZynAddSubFX folder or its parent presets dir).
+_XDG_DATA_HOME = Path(
+    os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+)
 _CANDIDATE_ROOTS = [
-    Path(os.environ.get("LMMS_PRESETS_DIR", "")) if os.environ.get("LMMS_PRESETS_DIR") else None,
-    Path("C:/Program Files/LMMS/data/presets/ZynAddSubFX"),
-    Path("C:/Program Files (x86)/LMMS/data/presets/ZynAddSubFX"),
-    Path.home() / "Documents/LMMS/presets/ZynAddSubFX",
-    Path.home() / ".lmms/presets/ZynAddSubFX",
+    Path(os.environ.get("MXM_PRESETS_DIR", "")) if os.environ.get("MXM_PRESETS_DIR") else None,
+    _XDG_DATA_HOME / "mxm/presets/ZynAddSubFX",
+    Path("/usr/share/mxm/presets/ZynAddSubFX"),
+    Path("/usr/local/share/mxm/presets/ZynAddSubFX"),
+    Path("C:/Program Files/MXM/data/presets/ZynAddSubFX"),
+    Path("C:/Program Files (x86)/MXM/data/presets/ZynAddSubFX"),
+    Path.home() / "AppData/Roaming/MXM/presets/ZynAddSubFX",
+    Path.home() / "Library/Application Support/MXM/presets/ZynAddSubFX",
+    Path.home() / "Documents/MXM/presets/ZynAddSubFX",
 ]
 
 
@@ -107,7 +115,8 @@ def load_preset_xml(path: str) -> str:
     base = get_presets_dir()
     if base is None:
         raise RuntimeError(
-            "No ZynAddSubFX presets directory found. Set LMMS_PRESETS_DIR."
+            "No ZynAddSubFX presets directory found. Install MXM or set "
+            "MXM_PRESETS_DIR."
         )
     name_part = given.stem if given.suffix == ".xiz" else given.name
     pattern = f"*{name_part}.xiz"

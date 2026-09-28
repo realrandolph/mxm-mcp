@@ -56,19 +56,19 @@ class TestXMLParser:
         assert head.get("bpm") == "120"
         assert root.find("song/timeline").get("stopbehaviour") == "1"
 
-    def test_create_empty_project_uses_installed_lmms_version(self, monkeypatch):
+    def test_create_empty_project_uses_installed_mxm_version(self, monkeypatch):
         from lmms_mcp import lmms_app
 
-        monkeypatch.setattr(lmms_app, "get_lmms_version", lambda: "1.3.0-alpha.1.1034")
+        monkeypatch.setattr(lmms_app, "get_mxm_version", lambda: "1.0.0-alpha.1")
         root = create_empty_project()
 
-        assert root.get("creatorversion") == "1.3.0-alpha.1.1034"
+        assert root.get("creatorversion") == "1.0.0-alpha.1"
         assert root.get("version") == "31"
 
-    def test_create_empty_project_falls_back_without_lmms(self, monkeypatch):
+    def test_create_empty_project_falls_back_without_mxm(self, monkeypatch):
         from lmms_mcp import lmms_app
 
-        monkeypatch.setattr(lmms_app, "get_lmms_version", lambda: None)
+        monkeypatch.setattr(lmms_app, "get_mxm_version", lambda: None)
         root = create_empty_project()
 
         assert root.get("creatorversion") == "1.2.0"
@@ -750,28 +750,67 @@ class TestAutomation:
         Path(path).unlink()
 
 
-class TestLmmsApp:
-    """Tests for installed-LMMS detection."""
+class TestMxmApp:
+    """Tests for installed-MXM detection."""
 
-    def test_find_exe(self):
+    def test_find_binary(self):
         from lmms_mcp import lmms_app
-        exe = lmms_app.find_lmms_exe()
-        # On the dev machine LMMS is installed; skip elsewhere
-        if exe is None:
-            pytest.skip("LMMS not installed")
-        assert exe.is_file()
+        binary = lmms_app.find_mxm_binary()
+        # On the dev machine MXM is installed; skip elsewhere
+        if binary is None:
+            pytest.skip("MXM not installed")
+        assert binary.is_file()
 
-    def test_get_lmms_version_preserves_prerelease_and_build(self, monkeypatch):
+    def test_configured_binary_wins(self, monkeypatch, tmp_path):
+        from lmms_mcp import lmms_app
+        binary = tmp_path / "mxm"
+        binary.write_bytes(b"#!/bin/true\n")
+        monkeypatch.setenv("MXM_EXECUTABLE", str(binary))
+        assert lmms_app.find_mxm_binary() == binary
+        # A configured path that is not a file is ignored, never returned
+        monkeypatch.setenv("MXM_EXECUTABLE", str(tmp_path / "nope"))
+        assert lmms_app.find_mxm_binary() != tmp_path / "nope"
+
+    def test_no_lmms_binary_detection(self):
+        from lmms_mcp import lmms_app
+        # The inherited LMMS/MXM executable detectors must be gone
+        assert not hasattr(lmms_app, "find_lmms_exe")
+        assert not hasattr(lmms_app, "find_mxm_exe")
+
+    def test_plugins_dir_from_binary_prefix(self, monkeypatch, tmp_path):
+        """An MXM-only install (bin/mxm + lib/mxm) is detected without LMMS."""
+        from lmms_mcp import lmms_app
+        binary = tmp_path / "bin" / "mxm"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"#!/bin/true\n")
+        plugins = tmp_path / "lib" / "mxm"
+        plugins.mkdir(parents=True)
+        (plugins / "libtripleoscillator.so").write_bytes(b"\x7fELF")
+        monkeypatch.setenv("MXM_EXECUTABLE", str(binary))
+        monkeypatch.delenv("MXM_PLUGIN_DIR", raising=False)
+        assert lmms_app.get_plugins_dir() == plugins
+        assert "tripleoscillator" in lmms_app.get_installed_plugins()
+
+    def test_plugin_dir_env_override(self, monkeypatch, tmp_path):
+        from lmms_mcp import lmms_app
+        plugins = tmp_path / "custom-plugins"
+        plugins.mkdir()
+        (plugins / "libcustomfx.so").write_bytes(b"\x7fELF")
+        monkeypatch.setenv("MXM_PLUGIN_DIR", str(plugins))
+        assert lmms_app.get_plugins_dir() == plugins
+        assert "customfx" in lmms_app.get_installed_plugins()
+
+    def test_get_mxm_version_preserves_prerelease_and_build(self, monkeypatch):
         from lmms_mcp import lmms_app
 
         class Completed:
-            stdout = "LMMS 1.3.0-alpha.1.1034+4e677cb\n"
+            stdout = "MXM 1.0.0-alpha.1.1034+4e677cb\n"
             stderr = ""
 
-        monkeypatch.setattr(lmms_app, "find_lmms_exe", lambda: Path("/fake/lmms"))
+        monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
         monkeypatch.setattr(lmms_app.subprocess, "run", lambda *args, **kwargs: Completed())
 
-        assert lmms_app.get_lmms_version() == "1.3.0-alpha.1.1034+4e677cb"
+        assert lmms_app.get_mxm_version() == "1.0.0-alpha.1.1034+4e677cb"
 
     def test_check_plugin_known_builtin(self):
         from lmms_mcp import lmms_app
@@ -787,17 +826,17 @@ class TestLmmsApp:
     def test_check_plugin_matches_dll_reality(self):
         """check_plugin_available must agree with the actual plugins dir."""
         from lmms_mcp import lmms_app
-        if lmms_app.find_lmms_exe() is None:
-            pytest.skip("LMMS not installed")
+        if lmms_app.find_mxm_binary() is None:
+            pytest.skip("MXM not installed")
         installed = lmms_app.get_installed_plugins()
-        # slicert: available iff its DLL exists (user may add/remove it)
+        # slicert: available iff its plugin library exists (user may add/remove it)
         ok, _ = lmms_app.check_plugin_available("slicert")
         assert ok == ("slicert" in installed)
 
     def test_check_unknown_plugin_reports_missing(self):
         from lmms_mcp import lmms_app
-        if lmms_app.find_lmms_exe() is None:
-            pytest.skip("LMMS not installed")
+        if lmms_app.find_mxm_binary() is None:
+            pytest.skip("MXM not installed")
         ok, reason = lmms_app.check_plugin_available(
             "definitely_not_a_real_plugin_12345"
         )
@@ -806,8 +845,8 @@ class TestLmmsApp:
 
     def test_classify_plugins(self):
         from lmms_mcp import lmms_app
-        if lmms_app.find_lmms_exe() is None:
-            pytest.skip("LMMS not installed")
+        if lmms_app.find_mxm_binary() is None:
+            pytest.skip("MXM not installed")
         result = lmms_app.classify_installed_plugins(
             {"tripleoscillator"}, {"delay"}
         )
@@ -843,22 +882,93 @@ class TestLmmsApp:
             lmms_app.find_vst_plugins("Z:/no/such/dir")
 
 
-class TestCustomPluginsAndVst:
-    """Tests for dynamic plugin usage and VST tracks."""
+class TestMxmAppConfiguration:
+    """The MCP exposes MXM-named app/config interfaces, never LMMS ones.
 
-    def test_custom_plugin_accepted(self):
-        """A DLL that exists in the plugins dir is accepted by name."""
+    Format-level names (``LMMSProject``, ``lmms-project``, plugin ids,
+    ``lmms://`` resource URIs) are intentionally not listed here.
+    """
+
+    _LEGACY_APP_NAMES = (
+        "AI-Projects",
+        "LMMS_PROJECTS_DIR",
+        "LMMS_PRESETS_DIR",
+        "LMMS_EXECUTABLE",
+        "LMMS_PLUGIN_DIR",
+        "get_lmms_info",
+        "lmms_found",
+        "find_lmms_exe",
+        "find_mxm_exe",
+    )
+
+    def test_source_has_no_lmms_application_interfaces(self):
+        package = Path(__file__).resolve().parents[1] / "src" / "lmms_mcp"
+        offenders = []
+        for source in sorted(package.rglob("*.py")):
+            text = source.read_text(encoding="utf-8")
+            offenders += [
+                f"{source.name}: {name}"
+                for name in self._LEGACY_APP_NAMES if name in text
+            ]
+        assert offenders == []
+
+    def test_docs_have_no_lmms_application_interfaces(self):
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for doc in ("README.md", "pyproject.toml"):
+            text = (root / doc).read_text(encoding="utf-8")
+            offenders += [
+                f"{doc}: {name}"
+                for name in self._LEGACY_APP_NAMES if name in text
+            ]
+        assert offenders == []
+
+    def test_tool_is_named_get_mxm_info(self):
+        from lmms_mcp import server as srv
+        assert hasattr(srv, "get_mxm_info")
+        assert not hasattr(srv, "get_lmms_info")
+
+    def test_list_available_plugins_reports_mxm_found(self):
+        from lmms_mcp import server as srv
+        result = json.loads(srv.list_available_plugins())
+        assert "mxm_found" in result
+        assert "lmms_found" not in result
+
+    def test_projects_dir_env_override(self, monkeypatch, tmp_path):
+        from lmms_mcp import server as srv
+        monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
+        assert srv._default_projects_dir() == tmp_path
+        monkeypatch.delenv("MXM_PROJECTS_DIR", raising=False)
+        assert srv._default_projects_dir() == Path.cwd()
+
+    def test_relative_save_uses_configured_projects_dir(self, monkeypatch, tmp_path):
         from lmms_mcp import server as srv
         from lmms_mcp.project import LMMSProject
+        monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
-        # papu ships as legacy DLL; if absent skip
-        from lmms_mcp import lmms_app
-        if "papu" not in lmms_app.get_installed_plugins():
-            pytest.skip("papu.dll not installed")
+        response = json.loads(srv.save_project("song.mmpz"))
+        assert Path(response["path"]) == tmp_path / "song.mmpz"
+        assert (tmp_path / "song.mmpz").is_file()
+
+
+class TestCustomPluginsAndVst:
+    """Tests for dynamic plugin usage and VST tracks."""
+
+    def test_custom_plugin_accepted(self, monkeypatch, tmp_path):
+        """A plugin library in the MXM plugins dir is accepted by name."""
+        from lmms_mcp import server as srv
+        from lmms_mcp.project import LMMSProject
+        plugins = tmp_path / "plugins"
+        plugins.mkdir()
+        (plugins / "libacmeinstrument.so").write_bytes(b"\x7fELF")
+        monkeypatch.setenv("MXM_PLUGIN_DIR", str(plugins))
+        proj = LMMSProject()
+        proj.new()
+        srv.set_project(proj)
         response = json.loads(
-            srv.add_instrument_track("Legacy", instrument="papu")
+            srv.add_instrument_track("Acme", instrument="acmeinstrument")
         )
         assert response.get("custom_plugin") is True
 
@@ -873,16 +983,15 @@ class TestCustomPluginsAndVst:
         )
         assert "error" in response
 
-    def test_add_vst_track_sets_plugin_path(self):
+    def test_add_vst_track_sets_plugin_path(self, tmp_path):
         from lmms_mcp import server as srv
         from lmms_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
-        # Use any existing file as stand-in DLL (only path handling tested)
-        dll = Path(r"C:\Program Files\LMMS\plugins\tripleoscillator.dll")
-        if not dll.is_file():
-            pytest.skip("LMMS plugins folder not found")
+        # A local stand-in DLL exercises only the path handling
+        dll = tmp_path / "tripleoscillator.dll"
+        dll.write_bytes(b"MZ fake")
         response = json.loads(srv.add_vst_track("VST Test", str(dll)))
         assert response.get("vst") == str(dll)
         track = find_tracks(proj.root)[0]

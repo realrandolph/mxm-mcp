@@ -40,7 +40,7 @@ def _isolate_mxm_build_options(monkeypatch):
     from lmms_mcp import lmms_app
 
     lmms_app.clear_mxm_build_options_cache()
-    monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: None)
+    monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: None)
     yield
     lmms_app.clear_mxm_build_options_cache()
 
@@ -206,8 +206,7 @@ class TestVst3Discovery:
         link = tmp_path / "launcher" / "mxm"
         link.parent.mkdir()
         link.symlink_to(exe)
-        monkeypatch.setattr(vst3.lmms_app, "find_mxm_exe", lambda: link)
-        monkeypatch.setattr(vst3.lmms_app, "find_lmms_exe", lambda: None)
+        monkeypatch.setattr(vst3.lmms_app, "find_mxm_binary", lambda: link)
         assert vst3._app_vst3_dir() == real_bin / "vst3"
 
     def test_platform_guard_short_circuits_discovery(self, monkeypatch):
@@ -294,7 +293,7 @@ class TestMxmBuildOptionsCache:
         from lmms_mcp import lmms_app
 
         calls = []
-        monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: Path("/fake/mxm"))
+        monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
         monkeypatch.setattr(lmms_app.subprocess, "run",
                             lambda *a, **k: calls.append(a) or _Completed(
                                 "MXM_HAVE_VST3='TRUE'\nWANT_VST3='ON'\n"))
