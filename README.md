@@ -188,11 +188,26 @@ e.g. SlicerT/Xpressive require LMMS 1.3+) and audio rendering.
 | Tool | Description |
 |------|-------------|
 | `list_available_plugins` | Dynamically list ALL installed plugins (incl. custom ones) |
-| `scan_vst_directory` | Find VST .dll files in a folder |
-| `add_vst_track` | Add a track hosting a VST plugin (Vestige) |
+| `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
+| `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
+| `scan_vst_directory` | Find legacy VST2 `.dll` files in a folder |
+| `add_vst_track` | Add a track hosting a legacy VST2 plugin (Vestige) |
 
 Custom LMMS plugins dropped into the plugins folder are detected
 automatically and can be used directly by name - no server update needed.
+
+**Native VST3 (MXM):** MXM hosts VST3 instruments natively through its
+`vst3instrument` plugin. Use `list_vst3_instruments` to find a plugin and
+`add_vst3_instrument_track` with its `module` path and 32-character `cid`.
+This is MXM's own host, never routed through Carla.
+
+Discovery follows MXM's per-platform search locations (Linux, Windows and
+macOS bundle layouts) plus `$VST3_PATH`, recursively and with absolute paths.
+`MXM_VST3_PATH_ONLY` (any value) restricts it to `$VST3_PATH`. Class ids and
+factory interface ids use the platform's VST3 byte order (COM/GUID order on
+Windows), and class names are read through `IPluginFactory3` so non-ASCII
+names survive. MXM currently compiles its VST3 host for Linux and Windows;
+`host_available` reports whether the installed binary actually has it.
 
 ### Utilities
 

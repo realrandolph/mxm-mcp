@@ -1,5 +1,6 @@
 """XML parser for LMMS .mmpz and .mmp project files."""
 
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -416,6 +417,47 @@ def configure_native_lv2_instrument(track: ET.Element, plugin_uri: str) -> None:
     ET.SubElement(controls, "models", {"freeWheeling": "0", "enabled": "1"})
     key = ET.SubElement(controls, "key")
     ET.SubElement(key, "attribute", {"name": "uri", "value": uri})
+
+
+#! MXM's native VST3 host plugin name, as written to <instrument name="...">.
+NATIVE_VST3_HOST = "vst3instrument"
+
+_VST3_CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+
+
+def configure_native_vst3_instrument(
+    track: ET.Element,
+    module: str,
+    cid: str,
+    state: str = "",
+) -> None:
+    """Configure a track for MXM's native VST3 host.
+
+    Writes ``<instrument name="vst3instrument"><vst3instrument>`` with an
+    optional base64 ``<state>``/``<models>`` and the ``module``/``cid``
+    ``<key>`` MXM matches on load. *module* is the ``.vst3`` bundle path and
+    *cid* its 32-hex class id, as reported by :mod:`lmms_mcp.vst3`.
+    """
+    module, cid = str(module).strip(), cid.strip()
+    if not module:
+        raise ValueError("Native VST3 instruments require the plugin module path")
+    if not _VST3_CID_RE.match(cid):
+        raise ValueError(
+            f"Native VST3 class id must be 32 hex characters (got {cid!r})"
+        )
+    instrument = track.find("instrumenttrack/instrument")
+    if instrument is None:
+        raise ValueError("Track has no instrument")
+    instrument.set("name", NATIVE_VST3_HOST)
+    for child in list(instrument):
+        instrument.remove(child)
+    wrapper = ET.SubElement(instrument, NATIVE_VST3_HOST)
+    if state:
+        ET.SubElement(wrapper, "state", {"encoding": "base64"}).text = state
+        ET.SubElement(wrapper, "models")
+    key = ET.SubElement(wrapper, "key")
+    ET.SubElement(key, "attribute", {"name": "module", "value": module})
+    ET.SubElement(key, "attribute", {"name": "cid", "value": cid.upper()})
 
 
 def _carla_plugin_type(path: Path) -> str:

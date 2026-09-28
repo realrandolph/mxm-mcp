@@ -211,3 +211,55 @@ def test_lmms13_effect_controls_render_audibly(tmp_path):
     assert stats["rms"] > 0.005
     assert stats["rms"] < 0.45
     assert stats["rms"] / max(stats["peak"], 1e-9) < 0.7
+
+
+def _find_mxm_exe() -> Path | None:
+    """Locate the MXM binary (LMMS fork with native VST3 hosting)."""
+    from lmms_mcp import lmms_app
+
+    build = Path.home() / "lmms" / "build" / "mxm"
+    return lmms_app.find_mxm_exe() or (build if build.is_file() else None)
+
+
+@pytest.mark.integration
+def test_mxm_native_vst3_renders_audibly(tmp_path):
+    from lmms_mcp import vst3
+
+    exe = _find_mxm_exe()
+    if exe is None:
+        pytest.skip("MXM executable is not installed")
+    instruments = [p for p in vst3.discover_vst3_plugins() if p["is_instrument"]]
+    if not instruments:
+        pytest.skip("No native VST3 instrument is installed")
+    chosen = next((p for p in instruments if p["name"] == "Surge XT"), instruments[0])
+
+    project = LMMSProject()
+    project.new(bpm=120)
+    server.set_project(project)
+    result = json.loads(
+        server.add_vst3_instrument_track("Native VST3", plugin=chosen["name"]))
+    assert result.get("host") == "vst3instrument" and result.get("verified") is True
+    assert result["native"] is True and result["carla"] is False
+    for key, pos in ((60, 0), (64, 48), (67, 96), (72, 144)):
+        project.add_note(0, key=key, pos=pos, length=42, volume=90)
+
+    project_path = tmp_path / "native_vst3.mmp"
+    output_path = tmp_path / "native_vst3.wav"
+    project.save(project_path, compressed=False)
+    root = xml_parser.load_project(project_path)
+    instrument = root.find(".//instrument[@name='vst3instrument']")
+    assert instrument is not None
+    assert root.find(".//instrument[@name='carlarack']") is None
+    assert root.find(".//lv2controls") is None
+    attrs = {a.get("name"): a.get("value")
+             for a in instrument.findall("vst3instrument/key/attribute")}
+    assert attrs == {"module": chosen["module"], "cid": chosen["cid"]}
+    assert root.find(".//midiclip/note") is not None
+
+    proc = subprocess.run(
+        [str(exe), "render", str(project_path), "-o", str(output_path),
+         "-f", "wav", "-s", "48000"],
+        capture_output=True, text=True, timeout=240,
+    )
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+    assert _audio_peak(output_path) > 0, "native VST3 render was silent"

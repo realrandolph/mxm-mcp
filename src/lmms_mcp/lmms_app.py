@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 _CANDIDATE_EXES = [
@@ -30,6 +31,28 @@ def find_lmms_exe() -> Path | None:
         if candidate is not None and candidate.is_file():
             return candidate
     return None
+
+
+_MXM_CANDIDATE_EXES = [
+    Path(os.environ.get("MXM_EXECUTABLE", "")) if os.environ.get("MXM_EXECUTABLE") else None,
+    Path.home() / ".local" / "bin" / "mxm",
+    Path("/usr/local/bin/mxm"),
+    Path("/usr/bin/mxm"),
+    Path("C:/Program Files/MXM/mxm.exe"),
+    Path("C:/Program Files (x86)/MXM/mxm.exe"),
+    Path.home() / "AppData/Local/Programs/MXM/mxm.exe",
+    Path("/Applications/MXM.app/Contents/MacOS/mxm"),
+    Path.home() / "Applications/MXM.app/Contents/MacOS/mxm",
+]
+
+
+def find_mxm_exe() -> Path | None:
+    """Locate the installed MXM executable (the LMMS fork with native VST3)."""
+    for candidate in _MXM_CANDIDATE_EXES:
+        if candidate is not None and candidate.is_file():
+            return candidate
+    found = shutil.which("mxm")
+    return Path(found) if found else None
 
 
 def get_plugins_dir() -> Path | None:
@@ -139,6 +162,46 @@ def lmms_supports_carla() -> bool:
         return True
     options = get_lmms_build_options()
     return options.get("carla", False) or options.get("weakcarla", False)
+
+
+@lru_cache(maxsize=1)
+def _mxm_build_options_cached() -> tuple[tuple[str, bool], ...]:
+    exe = find_mxm_exe()
+    if exe is None:
+        return ()
+    try:
+        proc = subprocess.run(
+            [str(exe), "--version"], capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    options = {
+        name.lower(): value.upper() in {"TRUE", "ON", "1"}
+        for name, value in re.findall(
+            r"(?:MXM_|WANT_)([A-Z0-9_]+)=?'?([A-Z0-9]+)'?", out
+        )
+    }
+    return tuple(sorted(options.items()))
+
+
+def get_mxm_build_options() -> dict[str, bool]:
+    """MXM ``--version`` build options (cached; returns a fresh dict)."""
+    return dict(_mxm_build_options_cached())
+
+
+def clear_mxm_build_options_cache() -> None:
+    _mxm_build_options_cached.cache_clear()
+
+
+def mxm_supports_native_vst3() -> bool:
+    """Whether the installed MXM was built with native VST3 hosting.
+
+    ``MXM_HAVE_VST3`` is the CMake define for the compiled host; ``WANT_VST3``
+    only records that it was requested, so it must not count (MXM does not
+    build the host on every platform).
+    """
+    return bool(get_mxm_build_options().get("have_vst3"))
 
 
 def find_linux_plugins(directory: str | Path, recursive: bool = True) -> list[dict]:
