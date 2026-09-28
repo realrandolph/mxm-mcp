@@ -1520,6 +1520,7 @@ def add_vst3_instrument_track(
         volume: Track volume (0-200)
         panning: Track panning (-100 to +100)
         allow_unverified: Allow a module/cid that local discovery did not see
+            (skips the discovery sweep)
     """
     proj = get_project()
 
@@ -1529,10 +1530,12 @@ def add_vst3_instrument_track(
             "error": "Provide both module_path and cid, or use plugin instead.",
         })
 
-    try:
-        discovered = vst3_mod.discover_vst3_plugins()
-    except Exception as exc:  # pragma: no cover - discovery is defensive
-        return json.dumps({"error": f"VST3 discovery failed: {exc}"})
+    def _discover():
+        """Run the discovery sweep, returning ``(plugins, error)``."""
+        try:
+            return vst3_mod.discover_vst3_plugins(), None
+        except Exception as exc:  # pragma: no cover - discovery is defensive
+            return None, f"VST3 discovery failed: {exc}"
 
     verified = True
     if explicit:
@@ -1541,18 +1544,9 @@ def add_vst3_instrument_track(
                 "error": "cid must be 32 hexadecimal characters "
                          "(see list_vst3_instruments).",
             })
-        descriptor, _ = vst3_mod.resolve_vst3_instrument(
-            discovered, module=module_path, cid=cid
-        )
-        if descriptor is None:
-            if not allow_unverified:
-                return json.dumps({
-                    "error": f"No installed VST3 plugin matches module "
-                             f"{module_path!r} and cid {cid!r}.",
-                    "hint": "Call list_vst3_instruments for the exact module "
-                            "and cid, or pass allow_unverified=True.",
-                    "available": [_vst3_descriptor(p) for p in discovered],
-                })
+        if allow_unverified:
+            # No verification was requested, so skip the discovery sweep
+            # (which probes every installed bundle) entirely.
             verified = False
             descriptor = {
                 "name": Path(module_path).stem,
@@ -1563,7 +1557,25 @@ def add_vst3_instrument_track(
                 "sub_categories": "",
                 "version": "",
             }
+        else:
+            discovered, error = _discover()
+            if error:
+                return json.dumps({"error": error})
+            descriptor, _ = vst3_mod.resolve_vst3_instrument(
+                discovered, module=module_path, cid=cid
+            )
+            if descriptor is None:
+                return json.dumps({
+                    "error": f"No installed VST3 plugin matches module "
+                             f"{module_path!r} and cid {cid!r}.",
+                    "hint": "Call list_vst3_instruments for the exact module "
+                            "and cid, or pass allow_unverified=True.",
+                    "available": [_vst3_descriptor(p) for p in discovered],
+                })
     else:
+        discovered, error = _discover()
+        if error:
+            return json.dumps({"error": error})
         descriptor, candidates = vst3_mod.resolve_vst3_instrument(
             discovered, plugin_name=plugin, instruments_only=True
         )

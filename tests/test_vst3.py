@@ -602,6 +602,45 @@ class TestVst3ServerTools:
         assert accepted["host"] == "vst3instrument"
         assert accepted["verified"] is False
 
+    def test_add_unverified_skips_discovery_sweep(self, monkeypatch):
+        self._new_project()
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("discovery must not run when unverified")
+
+        monkeypatch.setattr(vst3, "discover_vst3_plugins", spy)
+        result = json.loads(srv.add_vst3_instrument_track(
+            "Lead", module_path=SURGE_MODULE, cid=SURGE_CID,
+            allow_unverified=True,
+        ))
+        assert "error" not in result, result
+        assert result["verified"] is False
+        assert result["cid"] == SURGE_CID
+        assert calls == []
+
+    def test_add_verified_and_named_paths_still_discover(self, monkeypatch):
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return [_descriptor(name="Surge XT")]
+
+        monkeypatch.setattr(vst3, "discover_vst3_plugins", spy)
+
+        self._new_project()
+        by_name = json.loads(srv.add_vst3_instrument_track(
+            "Lead", plugin="Surge XT"
+        ))
+        assert by_name.get("verified") is True
+
+        explicit = json.loads(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID
+        ))
+        assert explicit.get("verified") is True
+        assert len(calls) == 2
+
     def test_add_rejects_incomplete_explicit_identity(self, monkeypatch):
         self._patch_discovery(monkeypatch, [])
         self._new_project()
