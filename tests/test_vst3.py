@@ -38,6 +38,16 @@ SURGE_MODULE = "/usr/lib/vst3/Surge XT.vst3"
 SURGE_CID = "ABCDEF019182FAEB566D624153675854"
 
 
+@pytest.fixture(autouse=True)
+def _clear_mxm_build_options_cache():
+    """Keep the cached MXM ``--version`` result from leaking between tests."""
+    from lmms_mcp import lmms_app
+
+    lmms_app.clear_mxm_build_options_cache()
+    yield
+    lmms_app.clear_mxm_build_options_cache()
+
+
 def _descriptor(
     name: str = "Synth",
     module: str = SURGE_MODULE,
@@ -220,6 +230,30 @@ class TestVst3Discovery:
         found = vst3.find_vst3_bundles()
         assert found == [tmp_path / "Real.vst3"]
 
+    def test_vst3_path_scan_does_not_descend_into_bundles(
+        self, tmp_path, monkeypatch
+    ):
+        # _collect_bundle_dirs must not walk into a .vst3 bundle, and must
+        # still recurse into ordinary directories.
+        (tmp_path / "Top.vst3" / "Nested.vst3").mkdir(parents=True)
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "Inner.vst3").mkdir()
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.setenv("VST3_PATH", str(tmp_path))
+
+        names = {path.name for path in vst3.find_vst3_bundles()}
+        assert names == {"Top.vst3", "Inner.vst3"}
+
+    def test_bundle_extension_match_is_case_sensitive(self, tmp_path, monkeypatch):
+        # MXM uses case-sensitive extension()/endsWith(".vst3").
+        (tmp_path / "lower.vst3").mkdir()
+        (tmp_path / "upper.VST3").mkdir()
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.setenv("VST3_PATH", str(tmp_path))
+
+        names = {path.name for path in vst3.find_vst3_bundles()}
+        assert names == {"lower.vst3"}
+
     def test_relative_vst3_path_is_made_absolute(self, tmp_path, monkeypatch):
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "Inner.vst3").mkdir()
@@ -261,9 +295,33 @@ class TestVst3Discovery:
         assert vst3._app_vst3_dir() == real_bin / "vst3"
 
     def test_native_vst3_platform_guard(self, monkeypatch):
+        def fake_probe(bundle):
+            return {
+                "module": str(bundle),
+                "classes": [{
+                    "cid": CID_A,
+                    "name": "Synth",
+                    "category": "Audio Module Class",
+                    "sub_categories": "Instrument|Synth",
+                    "vendor": "V",
+                    "version": "1",
+                    "class_flags": 0,
+                }],
+            }
+
         monkeypatch.setattr(vst3.sys, "platform", "win32")
         assert vst3.native_vst3_discovery_supported() is False
-        assert vst3.discover_vst3_plugins(bundles=[Path("/x.vst3")]) == []
+        # With a probe that *would* return a plugin, the guard must still
+        # short-circuit: this would fail if the guard were removed.
+        assert vst3.discover_vst3_plugins(
+            bundles=[Path("/x.vst3")], probe=fake_probe
+        ) == []
+
+        monkeypatch.setattr(vst3.sys, "platform", "linux")
+        assert vst3.native_vst3_discovery_supported() is True
+        assert len(vst3.discover_vst3_plugins(
+            bundles=[Path("/x.vst3")], probe=fake_probe
+        )) == 1
 
     def test_discover_filters_audio_modules_and_classifies(self):
         def fake_probe(bundle):
@@ -413,12 +471,8 @@ class TestMxmBuildOptionsCache:
             lmms_app.subprocess, "run",
             lambda *a, **k: calls.append(a) or Completed(),
         )
-        lmms_app.clear_mxm_build_options_cache()
-        try:
-            first = lmms_app.get_mxm_build_options()
-            second = lmms_app.get_mxm_build_options()
-        finally:
-            lmms_app.clear_mxm_build_options_cache()
+        first = lmms_app.get_mxm_build_options()
+        second = lmms_app.get_mxm_build_options()
 
         assert first == second
         assert first["have_vst3"] is True
@@ -433,13 +487,9 @@ class TestMxmBuildOptionsCache:
 
         monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: Path("/fake/mxm"))
         monkeypatch.setattr(lmms_app.subprocess, "run", lambda *a, **k: Completed())
-        lmms_app.clear_mxm_build_options_cache()
-        try:
-            first = lmms_app.get_mxm_build_options()
-            first["have_vst3"] = False
-            second = lmms_app.get_mxm_build_options()
-        finally:
-            lmms_app.clear_mxm_build_options_cache()
+        first = lmms_app.get_mxm_build_options()
+        first["have_vst3"] = False
+        second = lmms_app.get_mxm_build_options()
 
         assert second["have_vst3"] is True
 
@@ -557,7 +607,10 @@ class TestVst3ServerTools:
         assert "error" in response
         assert response["available"] == []
 
-    def test_add_rolls_back_track_when_configuration_fails(self, monkeypatch):
+    @pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
+    def test_add_rolls_back_track_when_configuration_fails(
+        self, monkeypatch, error_type
+    ):
         self._patch_discovery(monkeypatch, [_descriptor(name="Surge XT")])
         project = self._new_project()
         # Pretend the project was just saved/cleaned so a stray modified flag
@@ -565,7 +618,7 @@ class TestVst3ServerTools:
         project._modified = False
 
         def boom(*args, **kwargs):
-            raise ValueError("serialization failed")
+            raise error_type("serialization failed")
 
         monkeypatch.setattr(xml_parser, "configure_native_vst3_instrument", boom)
         response = json.loads(srv.add_vst3_instrument_track(

@@ -122,14 +122,15 @@ def _collect_bundles(directory: Path, result: list[Path], seen: set[str]) -> Non
     Mirrors MXM's ``findFilesWithExt`` (used for the standard locations):
     descend into ordinary directories but treat a ``.vst3`` entry as a bundle
     and do not descend into it. Named after MXM, which matches by extension
-    here, so ``.vst3`` files are included as well as bundles.
+    here, so ``.vst3`` files are included as well as bundles. The match is
+    case-sensitive, like MXM's ``extension()``/``endsWith``.
     """
     try:
         entries = sorted(directory.iterdir())
     except OSError:
         return
     for entry in entries:
-        if entry.suffix.lower() == ".vst3":
+        if entry.suffix == ".vst3":
             _append_bundle(entry, result, seen)
         elif entry.is_dir():
             _collect_bundles(entry, result, seen)
@@ -149,7 +150,7 @@ def _collect_bundle_dirs(directory: Path, result: list[Path], seen: set[str]) ->
     for entry in entries:
         if not entry.is_dir():
             continue
-        if entry.suffix.lower() == ".vst3":
+        if entry.suffix == ".vst3":
             _append_bundle(entry, result, seen)
         else:
             _collect_bundle_dirs(entry, result, seen)
@@ -165,7 +166,7 @@ def _add_bundles_from_path(path: Path, result: list[Path], seen: set[str]) -> No
     """
     if not path.exists():
         return
-    if path.suffix.lower() == ".vst3":
+    if path.suffix == ".vst3":
         _append_bundle(path, result, seen)
         return
     if path.is_dir():

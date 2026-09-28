@@ -1594,7 +1594,7 @@ def add_vst3_instrument_track(
         xml_parser.configure_native_vst3_instrument(
             track, descriptor["module"], descriptor["cid"], state=state,
         )
-    except ValueError as exc:
+    except Exception as exc:
         # Do not leave a bare vst3instrument track behind, nor mark the
         # project modified for a change that was rolled back.
         proj.remove_track(idx)
