@@ -198,23 +198,15 @@ automatically and can be used directly by name - no server update needed.
 
 **Native VST3 (MXM):** MXM hosts VST3 instruments natively through its
 `vst3instrument` plugin. Use `list_vst3_instruments` to find a plugin and
-`add_vst3_instrument_track` with its `module` path and 32-character `cid`
-to add it. This is MXM's own VST3 host and is completely separate from the
-Carla bridge - VST3 is never routed through Carla.
+`add_vst3_instrument_track` with its `module` path and 32-character `cid`.
+This is MXM's own host, never routed through Carla.
 
-The MCP discovers VST3 plugins from the same locations MXM scans:
-`$HOME/.vst3`, `/usr/lib64/vst3`, `/usr/lib/vst3`,
-`/usr/local/lib64/vst3`, `/usr/local/lib/vst3`, MXM's application `vst3`
-directory, plus `$VST3_PATH`. Directory scans are recursive and directory
-entries are recorded with absolute paths, matching MXM. Set
-`MXM_VST3_PATH_ONLY=1` (or to any value) to restrict discovery to
-`$VST3_PATH`, exactly like MXM.
-
-MXM builds its native VST3 host for all platforms it supports (tested on
-Linux so far). This MCP's discovery/probe currently implements the Linux
-bundle layout only, so `list_vst3_instruments` returns nothing elsewhere;
-you can still author a track by passing an explicit `module_path` + `cid`
-with `allow_unverified=True`.
+Discovery scans the same locations as MXM (`$HOME/.vst3`, `/usr/lib*/vst3`,
+`/usr/local/lib*/vst3`, MXM's app `vst3` dir, `$VST3_PATH`), recursively and
+with absolute paths. `MXM_VST3_PATH_ONLY` (any value) restricts it to
+`$VST3_PATH`. MXM builds its VST3 host for all supported platforms, but this
+MCP's discovery/probe implements the Linux bundle layout only; elsewhere,
+author with explicit `module_path` + `cid` and `allow_unverified=True`.
 
 ### Utilities
 

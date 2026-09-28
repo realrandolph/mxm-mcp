@@ -1281,14 +1281,12 @@ def list_available_plugins() -> str:
         "native_vst3_instrument_host": {
             "plugin": xml_parser.NATIVE_VST3_HOST,
             "mxm_available": lmms_app.mxm_supports_native_vst3(),
-            "list_tool": "list_vst3_instruments",
-            "add_tool": "add_vst3_instrument_track",
+            "tools": ["list_vst3_instruments", "add_vst3_instrument_track"],
         },
         "note": "Custom plugins can be used by their DLL name in "
-                "add_instrument_track or add_effect. For VST .dll files "
-                "on disk use add_vst_track instead. For native VST3 "
-                "instruments use list_vst3_instruments then "
-                "add_vst3_instrument_track (MXM's own VST3 host, not Carla).",
+                "add_instrument_track or add_effect. For legacy VST .dll "
+                "files use add_vst_track; for native VST3 use "
+                "list_vst3_instruments + add_vst3_instrument_track (not Carla).",
     }, indent=2)
 
 
@@ -1430,32 +1428,15 @@ def add_talking_bass_track(
     return json.dumps(result)
 
 
-def _vst3_descriptor(plugin: dict) -> dict:
-    """Public, agent-friendly view of a discovered VST3 plugin."""
-    return {
-        "name": plugin.get("name", ""),
-        "vendor": plugin.get("vendor", ""),
-        "module": plugin.get("module", ""),
-        "cid": plugin.get("cid", ""),
-        "is_instrument": bool(plugin.get("is_instrument")),
-        "sub_categories": plugin.get("sub_categories", ""),
-        "version": plugin.get("version", ""),
-    }
-
-
 @mcp.tool()
 def list_vst3_instruments(include_effects: bool = False) -> str:
-    """List native VST3 plugins installed for MXM's built-in VST3 host.
+    """List native VST3 plugins for MXM's built-in VST3 host (not Carla).
 
-    Scans the same locations MXM's native VST3 host scans (``$HOME/.vst3``,
-    ``/usr/lib*/vst3``, ``/usr/local/lib*/vst3``, MXM's application ``vst3``
-    directory, plus ``VST3_PATH``) and reads each plugin's real class id. Use
-    the returned ``module`` and ``cid`` with add_vst3_instrument_track.
-
-    This is MXM's native VST3 host, not the Carla bridge. Set
-    ``include_effects=True`` to also list VST3 effects. Discovery is
-    implemented for Linux (MXM's VST3 host targets all its platforms, but the
-    MCP probe only understands the Linux bundle layout so far).
+    Reads each module's real class id from the same locations MXM scans
+    (``$HOME/.vst3``, ``/usr/lib*/vst3``, ``/usr/local/lib*/vst3``, MXM's app
+    ``vst3`` dir, ``VST3_PATH``). Pass a plugin's ``module`` + ``cid`` to
+    add_vst3_instrument_track. Discovery is Linux-only in this MCP (MXM builds
+    its VST3 host for all supported platforms).
 
     Args:
         include_effects: Also list VST3 effects (default: instruments only)
@@ -1464,31 +1445,22 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
         plugins = vst3_mod.discover_vst3_plugins()
     except Exception as exc:  # pragma: no cover - discovery is defensive
         return json.dumps({"error": f"VST3 discovery failed: {exc}"})
-
     instruments = [p for p in plugins if p["is_instrument"]]
-    effects = [p for p in plugins if not p["is_instrument"]]
-    selected = plugins if include_effects else instruments
-    supported = vst3_mod.native_vst3_discovery_supported()
-    return json.dumps({
-        "host": xml_parser.NATIVE_VST3_HOST,
-        "native": True,
-        "carla": False,
-        "discovery_supported": supported,
+    payload = {
+        "host": xml_parser.NATIVE_VST3_HOST, "native": True, "carla": False,
+        "discovery_supported": vst3_mod.native_vst3_discovery_supported(),
         "path_only": vst3_mod.path_only_enabled(),
         "host_available": lmms_app.mxm_supports_native_vst3(),
         "search_paths": vst3_mod.effective_search_paths(),
         "instrument_count": len(instruments),
-        "effect_count": len(effects),
-        "plugins": [_vst3_descriptor(plugin) for plugin in selected],
-        "note": "Pass a plugin's module and cid to add_vst3_instrument_track. "
-                "VST3 discovery is performed by loading each module's factory.",
-        **({} if supported else {
-            "warning": "This MCP can only discover native VST3 plugins on "
-                       "Linux. MXM itself builds its VST3 host for all "
-                       "supported platforms; on this platform pass an "
-                       "explicit module_path and cid with allow_unverified.",
-        }),
-    }, indent=2)
+        "effect_count": len(plugins) - len(instruments),
+        "plugins": plugins if include_effects else instruments,
+    }
+    if not payload["discovery_supported"]:
+        payload["warning"] = ("This MCP can only discover native VST3 plugins "
+                              "on Linux; pass module_path + cid with "
+                              "allow_unverified.")
+    return json.dumps(payload, indent=2)
 
 
 @mcp.tool()
@@ -1503,24 +1475,22 @@ def add_vst3_instrument_track(
     panning: int = 0,
     allow_unverified: bool = False,
 ) -> str:
-    """Add an instrument track hosted by MXM's native VST3 host.
+    """Add an instrument track hosted by MXM's native VST3 host (not Carla).
 
-    This uses MXM's built-in ``vst3instrument`` plugin - it does NOT route
-    through Carla. Select a plugin either by ``plugin`` (a name from
-    list_vst3_instruments) or by explicit ``module_path`` + ``cid``.
+    Select a plugin by ``plugin`` (a name from list_vst3_instruments) or by an
+    explicit ``module_path`` + ``cid``. With ``allow_unverified=True`` the
+    explicit identity is used as-is and the discovery sweep is skipped.
 
     Args:
-        name: Track name (e.g. "Zebralette Lead")
-        plugin: Plugin name to select (matched against installed VST3 plugins)
-        module_path: Absolute path of the ``.vst3`` bundle (alternative to
-            plugin; must be combined with cid)
-        cid: 32-character hex class id from list_vst3_instruments
+        name: Track name
+        plugin: Installed VST3 instrument name to select
+        module_path: Absolute ``.vst3`` bundle path (with cid)
+        cid: 32-character hex class id
         state: Optional base64 plugin state to embed
-        mixer_channel: Mixer channel number (0=Master)
+        mixer_channel: Mixer channel (0=Master)
         volume: Track volume (0-200)
         panning: Track panning (-100 to +100)
-        allow_unverified: Allow a module/cid that local discovery did not see
-            (skips the discovery sweep)
+        allow_unverified: Accept module_path+cid unverified (skips discovery)
     """
     proj = get_project()
 
@@ -1537,7 +1507,7 @@ def add_vst3_instrument_track(
         except Exception as exc:  # pragma: no cover - discovery is defensive
             return None, f"VST3 discovery failed: {exc}"
 
-    verified = True
+    verified, descriptor = True, None
     if explicit:
         if not vst3_mod.is_valid_cid(cid):
             return json.dumps({
@@ -1545,17 +1515,12 @@ def add_vst3_instrument_track(
                          "(see list_vst3_instruments).",
             })
         if allow_unverified:
-            # No verification was requested, so skip the discovery sweep
-            # (which probes every installed bundle) entirely.
+            # No verification requested: skip the per-bundle discovery sweep.
             verified = False
             descriptor = {
-                "name": Path(module_path).stem,
-                "vendor": "",
+                "name": Path(module_path).stem, "vendor": "",
                 "module": os.path.abspath(module_path.strip()),
                 "cid": vst3_mod.normalize_cid(cid),
-                "is_instrument": True,
-                "sub_categories": "",
-                "version": "",
             }
         else:
             discovered, error = _discover()
@@ -1568,9 +1533,8 @@ def add_vst3_instrument_track(
                 return json.dumps({
                     "error": f"No installed VST3 plugin matches module "
                              f"{module_path!r} and cid {cid!r}.",
-                    "hint": "Call list_vst3_instruments for the exact module "
-                            "and cid, or pass allow_unverified=True.",
-                    "available": [_vst3_descriptor(p) for p in discovered],
+                    "hint": "Use list_vst3_instruments, or allow_unverified=True.",
+                    "available": discovered,
                 })
     else:
         discovered, error = _discover()
@@ -1580,66 +1544,46 @@ def add_vst3_instrument_track(
             discovered, plugin_name=plugin, instruments_only=True
         )
         if descriptor is None:
-            payload: dict = {
+            return json.dumps({
                 "error": f"No installed VST3 instrument matches {plugin!r}."
                 if candidates else "Provide plugin, or module_path and cid.",
-            }
-            if candidates:
-                payload["matches"] = [_vst3_descriptor(p) for p in candidates]
-            else:
-                payload["available"] = [
-                    _vst3_descriptor(p) for p in discovered if p["is_instrument"]
-                ]
-            return json.dumps(payload)
+                **({"matches": candidates} if candidates
+                   else {"available": [p for p in discovered if p["is_instrument"]]}),
+            })
 
     was_modified = proj._modified
     result = proj.add_track(
-        "instrument", name,
-        instrument=xml_parser.NATIVE_VST3_HOST,
-        mixer_channel=mixer_channel,
-        volume=volume,
-        panning=panning,
+        "instrument", name, instrument=xml_parser.NATIVE_VST3_HOST,
+        mixer_channel=mixer_channel, volume=volume, panning=panning,
     )
     idx = result["track_index"]
-    track = xml_parser.find_track_element(proj.root, idx)
     try:
         xml_parser.configure_native_vst3_instrument(
-            track, descriptor["module"], descriptor["cid"], state=state,
+            xml_parser.find_track_element(proj.root, idx),
+            descriptor["module"], descriptor["cid"], state=state,
         )
     except Exception as exc:
-        # Do not leave a bare vst3instrument track behind, nor mark the
-        # project modified for a change that was rolled back.
+        # Roll back rather than leave a bare track/dirty project.
         proj.remove_track(idx)
         proj._modified = was_modified
         return json.dumps({"error": str(exc)})
     proj._modified = True
 
     result.update({
-        "host": xml_parser.NATIVE_VST3_HOST,
-        "plugin": descriptor["module"],
+        "host": xml_parser.NATIVE_VST3_HOST, "plugin": descriptor["module"],
         "plugin_name": descriptor.get("name", ""),
-        "vendor": descriptor.get("vendor", ""),
-        "plugin_type": "VST3",
-        "native": True,
-        "carla": False,
-        "cid": descriptor["cid"],
+        "vendor": descriptor.get("vendor", ""), "plugin_type": "VST3",
+        "native": True, "carla": False, "cid": descriptor["cid"],
         "verified": verified,
     })
     if not vst3_mod.native_vst3_discovery_supported():
-        result["warning"] = (
-            "This MCP can only discover native VST3 plugins on Linux. MXM "
-            "builds its VST3 host for all supported platforms, so this project "
-            "may still load there; discovery was skipped here."
-        )
+        result["warning"] = ("This MCP can only discover native VST3 plugins "
+                             "on Linux; MXM builds its VST3 host for all "
+                             "supported platforms.")
     elif not Path(descriptor["module"]).is_dir():
-        result["warning"] = (
-            f"VST3 module not found on disk: {descriptor['module']}"
-        )
+        result["warning"] = f"VST3 module not found on disk: {descriptor['module']}"
     elif not lmms_app.mxm_supports_native_vst3():
-        result["warning"] = (
-            "The installed MXM binary was not detected with native VST3 "
-            "support; the plugin will load only in a VST3-enabled MXM build."
-        )
+        result["warning"] = "Installed MXM was not detected with native VST3 support."
     result["message"] = (
         f"Added native VST3 track '{name}' at index {idx} "
         f"({descriptor.get('name', descriptor['module'])})"

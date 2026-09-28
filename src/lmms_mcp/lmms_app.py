@@ -180,17 +180,11 @@ def _mxm_build_options_cached() -> tuple[tuple[str, bool], ...]:
 
 
 def get_mxm_build_options() -> dict[str, bool]:
-    """Return boolean build options reported by the MXM binary's ``--version``.
-
-    The subprocess result is cached (the installed binary does not change
-    during a session) but a fresh dict is returned so callers cannot mutate
-    the cache.
-    """
+    """MXM ``--version`` build options (cached; returns a fresh dict)."""
     return dict(_mxm_build_options_cached())
 
 
 def clear_mxm_build_options_cache() -> None:
-    """Drop the cached MXM ``--version`` result (used by tests)."""
     _mxm_build_options_cached.cache_clear()
 
 

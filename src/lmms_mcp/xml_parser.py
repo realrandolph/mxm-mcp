@@ -431,50 +431,29 @@ def configure_native_vst3_instrument(
     cid: str,
     state: str = "",
 ) -> None:
-    """Configure an instrument track for MXM's native VST3 instrument host.
+    """Configure a track for MXM's native VST3 host.
 
-    Writes the exact layout MXM's ``Vst3Instrument``/``MxmPluginBridge`` expect
-    (verified against a project saved by MXM):
-
-    .. code-block:: xml
-
-        <instrument name="vst3instrument">
-          <vst3instrument>
-            <state encoding="base64">...</state>   <!-- optional -->
-            <models>...</models>                    <!-- optional -->
-            <key>
-              <attribute name="module" value="/path/Plugin.vst3"/>
-              <attribute name="cid" value="0123...EF"/>
-            </key>
-          </vst3instrument>
-        </instrument>
-
-    ``module`` is the absolute path of the ``.vst3`` bundle and ``cid`` the
-    32-character class id, both exactly as reported by
-    :mod:`lmms_mcp.vst3`. ``state`` is optional base64 plugin state; when
-    omitted MXM instantiates the plugin with its defaults.
+    Writes ``<instrument name="vst3instrument"><vst3instrument>`` with an
+    optional base64 ``<state>``/``<models>`` and the ``module``/``cid``
+    ``<key>`` MXM matches on load. *module* is the ``.vst3`` bundle path and
+    *cid* its 32-hex class id, as reported by :mod:`lmms_mcp.vst3`.
     """
-    module = str(module).strip()
-    cid = cid.strip()
+    module, cid = str(module).strip(), cid.strip()
     if not module:
         raise ValueError("Native VST3 instruments require the plugin module path")
     if not _VST3_CID_RE.match(cid):
         raise ValueError(
-            "Native VST3 class id must be 32 hexadecimal characters "
-            f"(got {cid!r})"
+            f"Native VST3 class id must be 32 hex characters (got {cid!r})"
         )
-
     instrument = track.find("instrumenttrack/instrument")
     if instrument is None:
         raise ValueError("Track has no instrument")
     instrument.set("name", NATIVE_VST3_HOST)
     for child in list(instrument):
         instrument.remove(child)
-
     wrapper = ET.SubElement(instrument, NATIVE_VST3_HOST)
     if state:
-        state_element = ET.SubElement(wrapper, "state", {"encoding": "base64"})
-        state_element.text = state
+        ET.SubElement(wrapper, "state", {"encoding": "base64"}).text = state
         ET.SubElement(wrapper, "models")
     key = ET.SubElement(wrapper, "key")
     ET.SubElement(key, "attribute", {"name": "module", "value": module})
