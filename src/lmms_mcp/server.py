@@ -1271,7 +1271,9 @@ def list_available_plugins() -> str:
     classified = lmms_app.classify_installed_plugins(known_inst, known_eff)
     binary = lmms_app.find_mxm_binary()
     return json.dumps({
-        "mxm_found": binary is not None,
+        # Field name kept for backward compatibility; the value reports
+        # whether the installed MXM application was detected.
+        "lmms_found": binary is not None,
         "version": lmms_app.get_mxm_version(),
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
