@@ -1,10 +1,12 @@
-"""Detect the installed LMMS application and its available plugins.
+"""Detect the installed MXM application and its available plugins.
 
-The MCP server manipulates project files directly without launching
-LMMS. However, knowing which plugins the installed LMMS actually ships
-prevents generating projects with missing-plugin warnings.
+MXM is the DAW this MCP targets. The server manipulates LMMS-format
+project files directly without launching MXM. However, knowing which
+plugins the installed MXM actually ships prevents generating projects
+with missing-plugin warnings, and the MXM binary is used for version
+inspection and headless rendering.
 
-LMMS 1.2.x and 1.3.x differ in plugin availability, e.g.:
+Builds of the LMMS lineage differ in plugin availability, e.g.:
 - SlicerT, Xpressive: 1.3+ only
 - Compressor, Dispersion, FrequencyShifter, SlewDistortion effects: 1.3+ only
 """
@@ -16,25 +18,7 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-_CANDIDATE_EXES = [
-    Path(os.environ.get("LMMS_EXECUTABLE", "")) if os.environ.get("LMMS_EXECUTABLE") else None,
-    Path("C:/Program Files/LMMS/lmms.exe"),
-    Path("C:/Program Files (x86)/LMMS/lmms.exe"),
-    Path.home() / "AppData/Local/Programs/LMMS/lmms.exe",
-    Path.home() / ".local/bin/lmms",
-]
-
-
-def find_lmms_exe() -> Path | None:
-    """Locate the installed LMMS executable."""
-    for candidate in _CANDIDATE_EXES:
-        if candidate is not None and candidate.is_file():
-            return candidate
-    return None
-
-
-_MXM_CANDIDATE_EXES = [
-    Path(os.environ.get("MXM_EXECUTABLE", "")) if os.environ.get("MXM_EXECUTABLE") else None,
+_MXM_CANDIDATE_BINARIES = [
     Path.home() / ".local" / "bin" / "mxm",
     Path("/usr/local/bin/mxm"),
     Path("/usr/bin/mxm"),
@@ -46,38 +30,54 @@ _MXM_CANDIDATE_EXES = [
 ]
 
 
-def find_mxm_exe() -> Path | None:
-    """Locate the installed MXM executable (the LMMS fork with native VST3)."""
-    for candidate in _MXM_CANDIDATE_EXES:
-        if candidate is not None and candidate.is_file():
+def find_mxm_binary() -> Path | None:
+    """Locate the installed MXM binary (the LMMS fork with native VST3).
+
+    The configured ``MXM_EXECUTABLE`` wins, then the normal platform-specific
+    MXM installation locations, then ``mxm`` on ``PATH``.
+    """
+    configured = os.environ.get("MXM_EXECUTABLE")
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_file():
+            return candidate
+    for candidate in _MXM_CANDIDATE_BINARIES:
+        if candidate.is_file():
             return candidate
     found = shutil.which("mxm")
     return Path(found) if found else None
 
 
 def get_plugins_dir() -> Path | None:
-    """Return the plugins directory of the installed LMMS."""
-    configured = os.environ.get("LMMS_PLUGIN_DIR")
+    """Return the plugins directory of the installed MXM application."""
+    configured = os.environ.get("MXM_PLUGIN_DIR")
     if configured and Path(configured).is_dir():
         return Path(configured)
-    exe = find_lmms_exe()
-    if exe is None:
+    binary = find_mxm_binary()
+    if binary is None:
         return None
-    candidates = [exe.parent / "plugins"]
+    exe = Path(os.path.realpath(binary))
+    prefix = exe.parent.parent
+    candidates = [
+        exe.parent / "plugins",
+        prefix / "lib" / "mxm",
+        prefix / "lib64" / "mxm",
+        prefix / "Resources" / "plugins",
+    ]
     if os.name != "nt":
         candidates.extend((Path(p) for p in (
-            "/usr/lib/x86_64-linux-gnu/lmms",
-            "/usr/lib/lmms",
-            "/usr/local/lib/lmms",
+            "/usr/lib/x86_64-linux-gnu/mxm",
+            "/usr/lib/mxm",
+            "/usr/local/lib/mxm",
         )))
     return next((p for p in candidates if p.is_dir()), None)
 
 
 def get_installed_plugins() -> set[str]:
-    """Set of plugin library names shipped with the installed LMMS.
+    """Set of plugin library names shipped with the installed MXM.
 
     Names are lowercase LMMS plugin basenames (e.g. "tripleoscillator",
-    "reverbsc", "carlarack"). Returns an empty set if LMMS is not found.
+    "reverbsc", "carlarack"). Returns an empty set if MXM is not found.
     """
     plugins_dir = get_plugins_dir()
     if plugins_dir is None:
@@ -93,22 +93,22 @@ def get_installed_plugins() -> set[str]:
     return names
 
 
-def get_lmms_version() -> str | None:
-    """Version string of the installed LMMS, or None.
+def get_mxm_version() -> str | None:
+    """Version string of the installed MXM, or None.
 
-    Keep prerelease and build components because LMMS writes the complete
+    Keep prerelease and build components because MXM writes the complete
     application version into a project's creator metadata.
     """
-    exe = find_lmms_exe()
-    if exe is None:
+    binary = find_mxm_binary()
+    if binary is None:
         return None
     try:
         out = subprocess.run(
-            [str(exe), "--version"],
+            [str(binary), "--version"],
             capture_output=True, text=True, timeout=10,
         )
         match = re.search(
-            r"\bLMMS\s+"
+            r"\bMXM\s+"
             r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)",
             out.stdout + out.stderr,
         )
@@ -118,8 +118,8 @@ def get_lmms_version() -> str | None:
 
 
 # Known aliases across versions (XML name -> possible DLL names).
-# Some instruments are statically linked into lmms.exe and have no DLL;
-# those are listed in STATIC_PLUGINS.
+# Some instruments are statically linked into the MXM binary and have no
+# plugin library; those are listed in STATIC_PLUGINS.
 STATIC_PLUGINS = {
     # Official Windows builds link FreeBoy into the main binary
     "freeboy",
@@ -135,43 +135,14 @@ PLUGIN_ALIASES = {
 }
 
 
-def get_lmms_build_options() -> dict[str, bool]:
-    """Return boolean LMMS build options reported by ``--version``."""
-    exe = find_lmms_exe()
-    if exe is None:
-        return {}
-    try:
-        proc = subprocess.run(
-            [str(exe), "--version"], capture_output=True, text=True, timeout=10,
-        )
-        out = proc.stdout + proc.stderr
-    except (OSError, subprocess.TimeoutExpired):
-        return {}
-    return {
-        name.lower(): value.upper() in {"TRUE", "ON", "1"}
-        for name, value in re.findall(
-            r"(?:LMMS_|WANT_)([A-Z0-9_]+)=?'?([A-Z0-9]+)'?", out
-        )
-    }
-
-
-def lmms_supports_carla() -> bool:
-    """Whether LMMS exposes its Carla instrument plugins."""
-    installed = get_installed_plugins()
-    if {"carlarack", "carlapatchbay"} <= installed:
-        return True
-    options = get_lmms_build_options()
-    return options.get("carla", False) or options.get("weakcarla", False)
-
-
 @lru_cache(maxsize=1)
 def _mxm_build_options_cached() -> tuple[tuple[str, bool], ...]:
-    exe = find_mxm_exe()
-    if exe is None:
+    binary = find_mxm_binary()
+    if binary is None:
         return ()
     try:
         proc = subprocess.run(
-            [str(exe), "--version"], capture_output=True, text=True, timeout=10,
+            [str(binary), "--version"], capture_output=True, text=True, timeout=10,
         )
         out = proc.stdout + proc.stderr
     except (OSError, subprocess.TimeoutExpired):
@@ -192,6 +163,17 @@ def get_mxm_build_options() -> dict[str, bool]:
 
 def clear_mxm_build_options_cache() -> None:
     _mxm_build_options_cached.cache_clear()
+
+
+def mxm_supports_carla() -> bool:
+    """Whether the installed MXM exposes its Carla instrument plugins."""
+    installed = get_installed_plugins()
+    if {"carlarack", "carlapatchbay"} <= installed:
+        return True
+    options = get_mxm_build_options()
+    return any(options.get(name, False) for name in (
+        "carla", "have_carla", "have_weakcarla",
+    ))
 
 
 def mxm_supports_native_vst3() -> bool:
@@ -243,27 +225,28 @@ def find_linux_plugins(directory: str | Path, recursive: bool = True) -> list[di
 
 
 def check_plugin_available(plugin_name: str) -> tuple[bool, str]:
-    """Check whether a plugin exists in the installed LMMS.
+    """Check whether a plugin exists in the installed MXM.
 
-    Returns (available, reason). If no LMMS installation is detected,
-    everything is considered available (cannot verify).
+    Returns (available, reason). If no MXM installation (or no MXM plugins
+    directory) is detected, everything is considered available (cannot
+    verify).
     """
     name = plugin_name.lower()
-    if name in {"carlarack", "carlapatchbay"} and lmms_supports_carla():
+    if name in {"carlarack", "carlapatchbay"} and mxm_supports_carla():
         return True, "installed"
     if name in STATIC_PLUGINS:
         return True, "built-in"
     installed = get_installed_plugins()
     if not installed:
-        return True, "LMMS installation not found - cannot verify"
+        return True, "MXM plugins not found - cannot verify"
     if name in installed:
         return True, "installed"
     if any(alias in installed for alias in PLUGIN_ALIASES.get(name, {name})):
         return True, "installed (alias)"
     return False, (
-        f"'{plugin_name}' is not included in your installed LMMS "
+        f"'{plugin_name}' is not included in your installed MXM "
         f"(found {len(installed)} plugins). It may require a newer "
-        f"LMMS version."
+        f"build."
     )
 
 
@@ -271,10 +254,10 @@ def classify_installed_plugins(
     known_instruments: set[str],
     known_effects: set[str],
 ) -> dict[str, list[str]]:
-    """Classify all installed plugin DLLs by comparing with known names.
+    """Classify all installed plugin libraries by comparing with known names.
 
     Returns dict with keys "instruments", "effects", "unknown".
-    Unknown DLLs are custom/newer plugins the user added - they can be
+    Unknown libraries are custom/newer plugins the user added - they can be
     used but their type (instrument vs effect) is not known from the
     filename alone.
     """
@@ -298,13 +281,13 @@ def find_vst_plugins(directory: str | Path, recursive: bool = True) -> list[dict
     """Scan a directory for VST plugin DLLs.
 
     Returns list of dicts with name and path. Note: any .dll could be a
-    VST effect or instrument - LMMS decides on load.
+    VST effect or instrument - MXM decides on load.
     """
     root = Path(directory)
     if not root.is_dir():
         raise ValueError(f"Directory not found: {directory}")
     it = root.rglob("*.dll") if recursive else root.glob("*.dll")
-    skip = {"lmms.exe", "remotevstplugin.exe", "32bitvsthelper.exe"}
+    skip = {"mxm.exe", "remotevstplugin.exe", "32bitvsthelper.exe"}
     results = []
     for dll in sorted(it):
         if dll.stem.lower() in skip:

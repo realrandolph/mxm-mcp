@@ -98,9 +98,9 @@ def create_empty_project(
     master_pitch: int = 0,
 ) -> ET.Element:
     """Create a minimal empty LMMS project element tree."""
-    from .lmms_app import get_lmms_version
+    from .lmms_app import get_mxm_version
 
-    creator_version = get_lmms_version() or "1.2.0"
+    creator_version = get_mxm_version() or "1.2.0"
     root = ET.Element("lmms-project", {
         "version": "31",
         "creator": "LMMS",

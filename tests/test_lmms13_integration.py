@@ -1,18 +1,17 @@
-"""End-to-end native Surge XT validation against the installed LMMS."""
+"""End-to-end native Surge XT validation against the installed MXM."""
 
 import json
-import os
 import subprocess
 import wave
 from pathlib import Path
 
 import pytest
 
-from lmms_mcp import server, xml_parser
+from lmms_mcp import lmms_app, server, xml_parser
 from lmms_mcp.project import LMMSProject
 
 
-LMMS_EXE = os.environ.get("LMMS_EXECUTABLE", "/home/dolf/.local/bin/lmms")
+MXM_BINARY = lmms_app.find_mxm_binary()
 SURGE_LV2 = Path("/usr/lib/lv2/Surge XT.lv2")
 TALKINGBASS_LV2 = Path.home() / ".lv2" / "talkingbass.lv2"
 
@@ -40,9 +39,9 @@ def build_native_surge_validation_project() -> LMMSProject:
 
 @pytest.mark.integration
 def test_lmms13_native_surge_renders_audibly(tmp_path):
-    exe = Path(LMMS_EXE)
-    if not exe.exists():
-        pytest.skip("LMMS executable is not installed")
+    exe = MXM_BINARY
+    if exe is None:
+        pytest.skip("MXM binary is not installed")
     if not SURGE_LV2.is_dir():
         pytest.skip("Surge XT LV2 bundle is not installed")
 
@@ -81,9 +80,9 @@ def build_talking_bass_validation_project() -> LMMSProject:
 
 @pytest.mark.integration
 def test_lmms13_talking_bass_renders_audibly(tmp_path):
-    exe = Path(LMMS_EXE)
-    if not exe.exists():
-        pytest.skip("LMMS executable is not installed")
+    exe = MXM_BINARY
+    if exe is None:
+        pytest.skip("MXM binary is not installed")
     if not (TALKINGBASS_LV2 / "talkingbass.so").is_file():
         pytest.skip("Talking Bass LV2 is not installed")
 
@@ -187,9 +186,9 @@ def _assert_complete_effect_controls(root):
 
 @pytest.mark.integration
 def test_lmms13_effect_controls_render_audibly(tmp_path):
-    exe = Path(LMMS_EXE)
-    if not exe.exists():
-        pytest.skip("LMMS executable is not installed")
+    exe = MXM_BINARY
+    if exe is None:
+        pytest.skip("MXM binary is not installed")
 
     project = build_effect_controls_validation_project()
     project_path = tmp_path / "effect_controls.mmp"
@@ -213,21 +212,19 @@ def test_lmms13_effect_controls_render_audibly(tmp_path):
     assert stats["rms"] / max(stats["peak"], 1e-9) < 0.7
 
 
-def _find_mxm_exe() -> Path | None:
+def _find_mxm_binary() -> Path | None:
     """Locate the MXM binary (LMMS fork with native VST3 hosting)."""
-    from lmms_mcp import lmms_app
-
     build = Path.home() / "lmms" / "build" / "mxm"
-    return lmms_app.find_mxm_exe() or (build if build.is_file() else None)
+    return MXM_BINARY or (build if build.is_file() else None)
 
 
 @pytest.mark.integration
 def test_mxm_native_vst3_renders_audibly(tmp_path):
     from lmms_mcp import vst3
 
-    exe = _find_mxm_exe()
+    exe = _find_mxm_binary()
     if exe is None:
-        pytest.skip("MXM executable is not installed")
+        pytest.skip("MXM binary is not installed")
     instruments = [p for p in vst3.discover_vst3_plugins() if p["is_instrument"]]
     if not instruments:
         pytest.skip("No native VST3 instrument is installed")

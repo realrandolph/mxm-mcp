@@ -171,17 +171,19 @@ python -m lmms_mcp
 |------|-------------|
 | `add_automation` | Create automation curves for tempo, master volume/pitch, track volume/panning and mixer channel volume |
 
-### LMMS App Integration
+### App Integration
 
 | Tool | Description |
 |------|-------------|
-| `get_lmms_info` | Detect installed LMMS version + available plugins |
-| `render_project` | Export to WAV/FLAC/OGG/MP3 via headless LMMS render |
+| `get_lmms_info` | Detect installed MXM version + available plugins |
+| `render_project` | Export to WAV/FLAC/OGG/MP3 via headless MXM render |
 
-The server reads and writes project files directly - it never launches
-the LMMS GUI. The installed LMMS is only used for: preset discovery,
-plugin availability checks (warns about plugins your version lacks,
-e.g. SlicerT/Xpressive require LMMS 1.3+) and audio rendering.
+MXM is the only DAW binary this server detects or invokes. The server
+reads and writes LMMS-format project files directly - it never launches
+the MXM GUI. The installed MXM is only used for: preset discovery,
+plugin availability checks (warns about plugins the installed build
+lacks, e.g. SlicerT/Xpressive require a 1.3-lineage build) and audio
+rendering.
 
 ### Custom Plugins & VST
 
@@ -193,7 +195,7 @@ e.g. SlicerT/Xpressive require LMMS 1.3+) and audio rendering.
 | `scan_vst_directory` | Find legacy VST2 `.dll` files in a folder |
 | `add_vst_track` | Add a track hosting a legacy VST2 plugin (Vestige) |
 
-Custom LMMS plugins dropped into the plugins folder are detected
+Custom plugins dropped into MXM's plugins folder are detected
 automatically and can be used directly by name - no server update needed.
 
 **Native VST3 (MXM):** MXM hosts VST3 instruments natively through its
@@ -305,8 +307,9 @@ Typical chains:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LMMS_PROJECTS_DIR` | `~/Desktop/Media/lmms/AI-Projects` | Default directory for saving projects |
-| `LMMS_PRESETS_DIR` | auto-detected | Path to ZynAddSubFX presets folder (`data/presets/ZynAddSubFX`) |
-| `LMMS_EXECUTABLE` | auto-detected | Path to `lmms.exe` (for version/plugin checks and rendering) |
+| `MXM_EXECUTABLE` | auto-detected | Path to the MXM binary (for version/build checks and rendering) |
+| `MXM_PLUGIN_DIR` | auto-detected | MXM plugins directory (for plugin availability checks) |
+| `LMMS_PRESETS_DIR` | auto-detected | Path to the ZynAddSubFX presets folder (`presets/ZynAddSubFX`) |
 
 ## Configuration
 

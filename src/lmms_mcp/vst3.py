@@ -47,8 +47,7 @@ def normalize_cid(cid: str) -> str:
 
 def _app_vst3_dir() -> Path | None:
     """Application ``vst3`` dir, resolved like MXM's app-level scan."""
-    exe = lmms_app.find_mxm_exe() or lmms_app.find_lmms_exe()
-    return plat.app_dir_for_exe(exe)
+    return plat.app_dir_for_exe(lmms_app.find_mxm_binary())
 
 
 def standard_vst3_dirs() -> list[Path]:

@@ -283,8 +283,8 @@ def add_instrument_track(
     proj = get_project()
 
     if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
-        if not lmms_app.lmms_supports_carla():
-            return json.dumps({"error": "Installed LMMS does not expose Carla Rack/Patchbay plugins"})
+        if not lmms_app.mxm_supports_carla():
+            return json.dumps({"error": "Installed MXM does not expose Carla Rack/Patchbay plugins"})
 
     if instrument.strip().lower() == xml_parser.NATIVE_VST3_HOST:
         return json.dumps({
@@ -323,7 +323,7 @@ def add_instrument_track(
                     "track_index": None,
                     "custom_plugin": True,
                     "note": f"'{normalized}' is not in the built-in list "
-                            f"but is installed in your LMMS plugins folder.",
+                            f"but is installed in your MXM plugins folder.",
                 }
                 proj_result = proj.add_track(
                     "instrument", name,
@@ -346,7 +346,7 @@ def add_instrument_track(
             })
         normalized = resolved
 
-    # Check the installed LMMS actually ships this plugin
+    # Check the installed MXM actually ships this plugin
     available, reason = lmms_app.check_plugin_available(normalized)
     warning = None
     if not available:
@@ -987,8 +987,8 @@ def list_zyn_presets(category: str | None = None) -> str:
     if base is None:
         return json.dumps({
             "error": "No ZynAddSubFX presets directory found.",
-            "hint": "Set the LMMS_PRESETS_DIR environment variable to your "
-                    "LMMS data/presets/ZynAddSubFX folder.",
+            "hint": "Install MXM or set the LMMS_PRESETS_DIR environment "
+                    "variable to your MXM/LMMS data/presets/ZynAddSubFX folder.",
         })
     try:
         presets = zyn_presets.list_presets(category)
@@ -1135,26 +1135,26 @@ def set_instrument_filter(
 
 
 # ──────────────────────────────────────────────────────────────────
-# LMMS APP INTEGRATION (VERSION CHECK + RENDER/EXPORT)
+# MXM APP INTEGRATION (VERSION CHECK + RENDER/EXPORT)
 # ──────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
 def get_lmms_info() -> str:
-    """Get info about the installed LMMS application.
+    """Get info about the installed MXM application.
 
-    Shows the detected LMMS version, installation path and which
+    Shows the detected MXM version, installation path and which
     instrument/effect plugins are actually available. Use this to check
     whether a plugin is supported before using it.
     """
-    exe = lmms_app.find_lmms_exe()
-    if exe is None:
+    binary = lmms_app.find_mxm_binary()
+    if binary is None:
         return json.dumps({
             "found": False,
-            "message": "LMMS installation not found. Projects can still "
+            "message": "MXM installation not found. Projects can still "
                        "be created and saved, but plugin availability "
                        "cannot be verified and rendering is disabled. "
-                       "Set LMMS_EXECUTABLE env var to your lmms.exe.",
+                       "Set MXM_EXECUTABLE env var to your MXM binary.",
         })
     installed = sorted(lmms_app.get_installed_plugins())
     # Intersect with our known instruments/effects for quick reference
@@ -1168,8 +1168,8 @@ def get_lmms_info() -> str:
     ]
     return json.dumps({
         "found": True,
-        "version": lmms_app.get_lmms_version(),
-        "path": str(exe),
+        "version": lmms_app.get_mxm_version(),
+        "path": str(binary),
         "plugin_count": len(installed),
         "instruments_verified_available": inst_available,
         "effects_verified_available": eff_available,
@@ -1186,10 +1186,10 @@ def render_project(
     samplerate: int = 44100,
     bitrate: int = 160,
 ) -> str:
-    """Export the current project to an audio file using the installed LMMS.
+    """Export the current project to an audio file using the installed MXM.
 
-    This launches LMMS in headless render mode (no GUI). Requires a
-    working LMMS installation. The project is saved first, then rendered.
+    This launches MXM in headless render mode (no GUI). Requires a
+    working MXM installation. The project is saved first, then rendered.
 
     Args:
         output_path: Output file path (default: <project>.wav in the
@@ -1203,10 +1203,10 @@ def render_project(
         return json.dumps({
             "error": "Project has never been saved. Call save_project first."
         })
-    exe = lmms_app.find_lmms_exe()
-    if exe is None:
+    binary = lmms_app.find_mxm_binary()
+    if binary is None:
         return json.dumps({
-            "error": "LMMS executable not found. Set LMMS_EXECUTABLE env var.",
+            "error": "MXM binary not found. Set MXM_EXECUTABLE env var.",
         })
 
     fmt = file_format.lower()
@@ -1226,7 +1226,7 @@ def render_project(
 
     import subprocess
     cmd = [
-        str(exe), "render", str(proj_path),
+        str(binary), "render", str(proj_path),
         "-o", output_path, "-f", fmt,
         "-s", str(samplerate), "-b", str(bitrate),
     ]
@@ -1258,26 +1258,26 @@ def render_project(
 
 @mcp.tool()
 def list_available_plugins() -> str:
-    """List ALL plugins installed in your LMMS, dynamically detected.
+    """List ALL plugins installed in your MXM, dynamically detected.
 
     Includes built-in instruments/effects plus any custom plugins the
-    user added to LMMS's plugins folder. Custom plugins can be used
+    user added to MXM's plugins folder. Custom plugins can be used
     directly by name in add_instrument_track / add_effect.
     """
     known_inst = set(KNOWN_INSTRUMENTS.keys())
-    if not lmms_app.lmms_supports_carla():
+    if not lmms_app.mxm_supports_carla():
         known_inst -= {"carlarack", "carlapatchbay"}
     known_eff = set(effects_mod.KNOWN_EFFECTS.keys())
     classified = lmms_app.classify_installed_plugins(known_inst, known_eff)
-    exe = lmms_app.find_lmms_exe()
+    binary = lmms_app.find_mxm_binary()
     return json.dumps({
-        "lmms_found": exe is not None,
-        "version": lmms_app.get_lmms_version(),
+        "mxm_found": binary is not None,
+        "version": lmms_app.get_mxm_version(),
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
         "custom_plugins_unknown_type": classified["unknown"],
         "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
-                              if lmms_app.lmms_supports_carla()],
+                              if lmms_app.mxm_supports_carla()],
         "native_vst3_instrument_host": {
             "plugin": xml_parser.NATIVE_VST3_HOST,
             "mxm_available": lmms_app.mxm_supports_native_vst3(),
@@ -1312,8 +1312,8 @@ def add_carla_instrument_track(
     bridge = bridge.strip().lower()
     if bridge not in {"carlarack", "carlapatchbay"}:
         return json.dumps({"error": "bridge must be 'carlarack' or 'carlapatchbay'"})
-    if not lmms_app.lmms_supports_carla():
-        return json.dumps({"error": "Installed LMMS does not expose Carla plugins"})
+    if not lmms_app.mxm_supports_carla():
+        return json.dumps({"error": "Installed MXM does not expose Carla plugins"})
     project = get_project()
     result = project.add_track("instrument", name, instrument=bridge,
                                mixer_channel=mixer_channel, volume=volume,
@@ -1334,7 +1334,7 @@ def load_carla_plugin(
 ) -> str:
     """Load an installed VST3, CLAP, or LV2 plugin into a Carla track.
 
-    Surge XT uses LMMS's native LV2 instrument host; use add_surge_xt_track.
+    Surge XT uses MXM's native LV2 instrument host; use add_surge_xt_track.
     """
     try:
         result = xml_parser.load_carla_plugin(get_project().root, track_index,
@@ -1353,7 +1353,7 @@ def add_surge_xt_track(
     volume: int = 100,
     panning: int = 0,
 ) -> str:
-    """Add Surge XT using LMMS's native LV2 instrument host."""
+    """Add Surge XT using MXM's native LV2 instrument host."""
     path = Path(lv2_path)
     if not path.is_dir() or path.suffix.lower() != ".lv2":
         return json.dumps({"error": f"Surge XT LV2 bundle not found: {lv2_path}"})
@@ -1388,10 +1388,10 @@ def add_talking_bass_track(
     split_hz: float = 140.0,
     drive: float = 0.35,
 ) -> str:
-    """Add a MIDI talking/ram bass using LMMS's native LV2 instrument host.
+    """Add a MIDI talking/ram bass using MXM's native LV2 instrument host.
 
     talkingbass.lv2 is an InstrumentPlugin (MIDI in, stereo out). Hosting it as
-    lv2effect crashes LMMS. Requires ~/.lv2/talkingbass.lv2
+    lv2effect crashes MXM. Requires ~/.lv2/talkingbass.lv2
     (make -C lmms-mcp/plugins/talkingbass install).
     """
     bundle = Path(xml_parser.TALKINGBASS_LV2_BUNDLE)
@@ -1422,7 +1422,7 @@ def add_talking_bass_track(
         "vowel": vowel, "lfo_hz": lfo_hz, "lfo_amt": lfo_amt,
         "split_hz": split_hz, "drive": drive,
         "note": "Play MIDI on this track. Plugin synthesizes its own saw/sub. "
-                "Open the LV2 UI in LMMS to tweak vowel/LFO if XML port state is not restored.",
+                "Open the LV2 UI in MXM to tweak vowel/LFO if XML port state is not restored.",
         "message": f"Added talking bass track '{name}' at index {idx}",
     })
     return json.dumps(result)
@@ -1610,7 +1610,7 @@ def scan_vst_directory(directory: str, recursive: bool = True) -> str:
         "count": len(plugins),
         "plugins": plugins,
         "hint": "Use add_vst_track with a plugin path. Note: whether a "
-                "DLL is an instrument or effect is decided by LMMS on "
+                "DLL is an instrument or effect is decided by MXM on "
                 "load.",
     }, indent=2)
 
@@ -1625,8 +1625,8 @@ def add_vst_track(
 ) -> str:
     """Add a track hosting a VST plugin (.dll file).
 
-    Uses LMMS's Vestige host. The VST must be compatible with your
-    LMMS architecture (64-bit LMMS needs 64-bit VSTs).
+    Uses MXM's Vestige host. The VST must be compatible with your
+    MXM architecture (64-bit MXM needs 64-bit VSTs).
 
     Args:
         name: Track name (e.g. "Spire Lead")
@@ -1661,10 +1661,10 @@ def add_vst_track(
         track = xml_parser.find_track_element(proj.root, track_idx)
         vestige_el = track.find("instrumenttrack/instrument/vestige")
         if vestige_el is not None:
-            # Prefer path relative to LMMS dir when possible
-            exe = lmms_app.find_lmms_exe()
+            # Prefer path relative to the MXM install dir when possible
+            binary = lmms_app.find_mxm_binary()
             try:
-                rel = path.relative_to(exe.parent) if exe else None
+                rel = path.relative_to(binary.parent) if binary else None
             except ValueError:
                 rel = None
             vestige_el.set("plugin", str(rel if rel else path))
@@ -2390,15 +2390,15 @@ def export_project(
         path: Output file path
     """
     if format == "wav":
-        return """To export as WAV audio, the project needs to be rendered using LMMS.
+        return """To export as WAV audio, the project needs to be rendered using MXM.
 
 Steps:
 1. Save the project first using save_project
-2. Render using: lmms --render <project.mmpz> -o <output.wav>
-3. Or use the --export option in LMMS GUI
+2. Render using the render_project tool (or: mxm render <project.mmpz> -o <output.wav>)
+3. Or use the --export option in the MXM GUI
 
 Note: The MCP server can create and modify project files,
-but audio rendering requires the LMMS application."""
+but audio rendering requires the MXM application."""
     else:
         return f"""Save the project in {format} format.
 
