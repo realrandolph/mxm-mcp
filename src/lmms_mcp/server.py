@@ -14,6 +14,7 @@ from mcp.server import MCPServer
 from . import effects as effects_mod
 from . import lmms_app
 from . import presets as zyn_presets
+from . import vst3 as vst3_mod
 from . import xml_parser
 from .models import (
     NOTE_NAMES,
@@ -99,9 +100,13 @@ freeboy/nes/sid (chiptune), organic (pads/organ).
 
 Custom plugins: The user may have installed additional LMMS plugins or
  VSTs. Check list_available_plugins for dynamically detected custom
- plugins. On Linux, use add_carla_instrument_track and load_carla_plugin
- for installed plugins. Surge XT uses LMMS's native LV2 instrument host.
- Legacy VST .dll files remain available through
+ plugins. Surge XT uses LMMS's native LV2 instrument host.
+
+Native VST3: MXM hosts VST3 instruments natively (plugin
+ "vst3instrument"). Use list_vst3_instruments to discover installed
+ instruments, then add_vst3_instrument_track with the returned module
+ path and class id. This is separate from Carla; do not route VST3
+ through Carla. Legacy VST2 .dll files remain available through
  scan_vst_directory and add_vst_track.
 
 ZynAddSubFX: For rich sounds, add a track with instrument "zynaddsubfx",
@@ -280,6 +285,12 @@ def add_instrument_track(
     if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
         if not lmms_app.lmms_supports_carla():
             return json.dumps({"error": "Installed LMMS does not expose Carla Rack/Patchbay plugins"})
+
+    if instrument.strip().lower() == xml_parser.NATIVE_VST3_HOST:
+        return json.dumps({
+            "error": "Use add_vst3_instrument_track to host a native VST3 "
+                     "plugin (it needs the plugin's module path and class id).",
+        })
 
     # Validate instrument name (case-insensitive fuzzy match)
     normalized = instrument.strip().lower()
@@ -1267,9 +1278,17 @@ def list_available_plugins() -> str:
         "custom_plugins_unknown_type": classified["unknown"],
         "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
                               if lmms_app.lmms_supports_carla()],
+        "native_vst3_instrument_host": {
+            "plugin": xml_parser.NATIVE_VST3_HOST,
+            "mxm_available": lmms_app.mxm_supports_native_vst3(),
+            "list_tool": "list_vst3_instruments",
+            "add_tool": "add_vst3_instrument_track",
+        },
         "note": "Custom plugins can be used by their DLL name in "
                 "add_instrument_track or add_effect. For VST .dll files "
-                "on disk use add_vst_track instead.",
+                "on disk use add_vst_track instead. For native VST3 "
+                "instruments use list_vst3_instruments then "
+                "add_vst3_instrument_track (MXM's own VST3 host, not Carla).",
     }, indent=2)
 
 
@@ -1408,6 +1427,189 @@ def add_talking_bass_track(
                 "Open the LV2 UI in LMMS to tweak vowel/LFO if XML port state is not restored.",
         "message": f"Added talking bass track '{name}' at index {idx}",
     })
+    return json.dumps(result)
+
+
+def _vst3_descriptor(plugin: dict) -> dict:
+    """Public, agent-friendly view of a discovered VST3 plugin."""
+    return {
+        "name": plugin.get("name", ""),
+        "vendor": plugin.get("vendor", ""),
+        "module": plugin.get("module", ""),
+        "cid": plugin.get("cid", ""),
+        "is_instrument": bool(plugin.get("is_instrument")),
+        "sub_categories": plugin.get("sub_categories", ""),
+        "version": plugin.get("version", ""),
+    }
+
+
+@mcp.tool()
+def list_vst3_instruments(include_effects: bool = False) -> str:
+    """List native VST3 plugins installed for MXM's built-in VST3 host.
+
+    Scans the same locations MXM's native VST3 host scans (``$HOME/.vst3``,
+    ``/usr/lib*/vst3``, ``/usr/local/lib*/vst3``, MXM's application ``vst3``
+    directory, plus ``VST3_PATH``) and reads each plugin's real class id. Use
+    the returned ``module`` and ``cid`` with add_vst3_instrument_track.
+
+    This is MXM's native VST3 host, not the Carla bridge. Set
+    ``include_effects=True`` to also list VST3 effects.
+
+    Args:
+        include_effects: Also list VST3 effects (default: instruments only)
+    """
+    try:
+        plugins = vst3_mod.discover_vst3_plugins()
+    except Exception as exc:  # pragma: no cover - discovery is defensive
+        return json.dumps({"error": f"VST3 discovery failed: {exc}"})
+
+    instruments = [p for p in plugins if p["is_instrument"]]
+    effects = [p for p in plugins if not p["is_instrument"]]
+    selected = plugins if include_effects else instruments
+    return json.dumps({
+        "host": xml_parser.NATIVE_VST3_HOST,
+        "native": True,
+        "carla": False,
+        "host_available": lmms_app.mxm_supports_native_vst3(),
+        "search_paths": [str(path) for path in vst3_mod.standard_vst3_dirs()],
+        "instrument_count": len(instruments),
+        "effect_count": len(effects),
+        "plugins": [_vst3_descriptor(plugin) for plugin in selected],
+        "note": "Pass a plugin's module and cid to add_vst3_instrument_track. "
+                "VST3 discovery is performed by loading each module's factory.",
+    }, indent=2)
+
+
+@mcp.tool()
+def add_vst3_instrument_track(
+    name: str,
+    plugin: str = "",
+    module_path: str = "",
+    cid: str = "",
+    state: str = "",
+    mixer_channel: int = 0,
+    volume: int = 100,
+    panning: int = 0,
+    allow_unverified: bool = False,
+) -> str:
+    """Add an instrument track hosted by MXM's native VST3 host.
+
+    This uses MXM's built-in ``vst3instrument`` plugin - it does NOT route
+    through Carla. Select a plugin either by ``plugin`` (a name from
+    list_vst3_instruments) or by explicit ``module_path`` + ``cid``.
+
+    Args:
+        name: Track name (e.g. "Zebralette Lead")
+        plugin: Plugin name to select (matched against installed VST3 plugins)
+        module_path: Absolute path of the ``.vst3`` bundle (alternative to
+            plugin; must be combined with cid)
+        cid: 32-character hex class id from list_vst3_instruments
+        state: Optional base64 plugin state to embed
+        mixer_channel: Mixer channel number (0=Master)
+        volume: Track volume (0-200)
+        panning: Track panning (-100 to +100)
+        allow_unverified: Allow a module/cid that local discovery did not see
+    """
+    proj = get_project()
+
+    explicit = bool(module_path.strip() or cid.strip())
+    if explicit and not (module_path.strip() and cid.strip()):
+        return json.dumps({
+            "error": "Provide both module_path and cid, or use plugin instead.",
+        })
+
+    try:
+        discovered = vst3_mod.discover_vst3_plugins()
+    except Exception as exc:  # pragma: no cover - discovery is defensive
+        return json.dumps({"error": f"VST3 discovery failed: {exc}"})
+
+    verified = True
+    if explicit:
+        if not vst3_mod.is_valid_cid(cid):
+            return json.dumps({
+                "error": "cid must be 32 hexadecimal characters "
+                         "(see list_vst3_instruments).",
+            })
+        descriptor, _ = vst3_mod.resolve_vst3_instrument(
+            discovered, module=module_path, cid=cid
+        )
+        if descriptor is None:
+            if not allow_unverified:
+                return json.dumps({
+                    "error": f"No installed VST3 plugin matches module "
+                             f"{module_path!r} and cid {cid!r}.",
+                    "hint": "Call list_vst3_instruments for the exact module "
+                            "and cid, or pass allow_unverified=True.",
+                    "available": [_vst3_descriptor(p) for p in discovered],
+                })
+            verified = False
+            descriptor = {
+                "name": Path(module_path).stem,
+                "vendor": "",
+                "module": module_path.strip(),
+                "cid": vst3_mod.normalize_cid(cid),
+                "is_instrument": True,
+                "sub_categories": "",
+                "version": "",
+            }
+    else:
+        descriptor, candidates = vst3_mod.resolve_vst3_instrument(
+            discovered, plugin_name=plugin
+        )
+        if descriptor is None:
+            payload: dict = {
+                "error": f"No installed VST3 instrument matches {plugin!r}."
+                if candidates else "Provide plugin, or module_path and cid.",
+            }
+            if candidates:
+                payload["matches"] = [_vst3_descriptor(p) for p in candidates]
+            else:
+                payload["available"] = [
+                    _vst3_descriptor(p) for p in discovered if p["is_instrument"]
+                ]
+            return json.dumps(payload)
+
+    result = proj.add_track(
+        "instrument", name,
+        instrument=xml_parser.NATIVE_VST3_HOST,
+        mixer_channel=mixer_channel,
+        volume=volume,
+        panning=panning,
+    )
+    idx = result["track_index"]
+    track = xml_parser.find_track_element(proj.root, idx)
+    try:
+        xml_parser.configure_native_vst3_instrument(
+            track, descriptor["module"], descriptor["cid"], state=state,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    proj._modified = True
+
+    result.update({
+        "host": xml_parser.NATIVE_VST3_HOST,
+        "plugin": descriptor["module"],
+        "plugin_name": descriptor.get("name", ""),
+        "vendor": descriptor.get("vendor", ""),
+        "plugin_type": "VST3",
+        "native": True,
+        "carla": False,
+        "cid": descriptor["cid"],
+        "verified": verified,
+    })
+    if not Path(descriptor["module"]).is_dir():
+        result["warning"] = (
+            f"VST3 module not found on disk: {descriptor['module']}"
+        )
+    elif not lmms_app.mxm_supports_native_vst3():
+        result["warning"] = (
+            "The installed MXM binary was not detected with native VST3 "
+            "support; the plugin will load only in a VST3-enabled MXM build."
+        )
+    result["message"] = (
+        f"Added native VST3 track '{name}' at index {idx} "
+        f"({descriptor.get('name', descriptor['module'])})"
+    )
     return json.dumps(result)
 
 

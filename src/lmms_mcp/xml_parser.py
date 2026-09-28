@@ -1,5 +1,6 @@
 """XML parser for LMMS .mmpz and .mmp project files."""
 
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -416,6 +417,68 @@ def configure_native_lv2_instrument(track: ET.Element, plugin_uri: str) -> None:
     ET.SubElement(controls, "models", {"freeWheeling": "0", "enabled": "1"})
     key = ET.SubElement(controls, "key")
     ET.SubElement(key, "attribute", {"name": "uri", "value": uri})
+
+
+#! MXM's native VST3 host plugin name, as written to <instrument name="...">.
+NATIVE_VST3_HOST = "vst3instrument"
+
+_VST3_CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+
+
+def configure_native_vst3_instrument(
+    track: ET.Element,
+    module: str,
+    cid: str,
+    state: str = "",
+) -> None:
+    """Configure an instrument track for MXM's native VST3 instrument host.
+
+    Writes the exact layout MXM's ``Vst3Instrument``/``MxmPluginBridge`` expect
+    (verified against a project saved by MXM):
+
+    .. code-block:: xml
+
+        <instrument name="vst3instrument">
+          <vst3instrument>
+            <state encoding="base64">...</state>   <!-- optional -->
+            <models>...</models>                    <!-- optional -->
+            <key>
+              <attribute name="module" value="/path/Plugin.vst3"/>
+              <attribute name="cid" value="0123...EF"/>
+            </key>
+          </vst3instrument>
+        </instrument>
+
+    ``module`` is the absolute path of the ``.vst3`` bundle and ``cid`` the
+    32-character class id, both exactly as reported by
+    :mod:`lmms_mcp.vst3`. ``state`` is optional base64 plugin state; when
+    omitted MXM instantiates the plugin with its defaults.
+    """
+    module = str(module).strip()
+    cid = cid.strip()
+    if not module:
+        raise ValueError("Native VST3 instruments require the plugin module path")
+    if not _VST3_CID_RE.match(cid):
+        raise ValueError(
+            "Native VST3 class id must be 32 hexadecimal characters "
+            f"(got {cid!r})"
+        )
+
+    instrument = track.find("instrumenttrack/instrument")
+    if instrument is None:
+        raise ValueError("Track has no instrument")
+    instrument.set("name", NATIVE_VST3_HOST)
+    for child in list(instrument):
+        instrument.remove(child)
+
+    wrapper = ET.SubElement(instrument, NATIVE_VST3_HOST)
+    if state:
+        state_element = ET.SubElement(wrapper, "state", {"encoding": "base64"})
+        state_element.text = state
+        ET.SubElement(wrapper, "models")
+    key = ET.SubElement(wrapper, "key")
+    ET.SubElement(key, "attribute", {"name": "module", "value": module})
+    ET.SubElement(key, "attribute", {"name": "cid", "value": cid.upper()})
 
 
 def _carla_plugin_type(path: Path) -> str:

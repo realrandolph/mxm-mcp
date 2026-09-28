@@ -32,6 +32,22 @@ def find_lmms_exe() -> Path | None:
     return None
 
 
+_MXM_CANDIDATE_EXES = [
+    Path(os.environ.get("MXM_EXECUTABLE", "")) if os.environ.get("MXM_EXECUTABLE") else None,
+    Path("/usr/local/bin/mxm"),
+    Path("/usr/bin/mxm"),
+    Path.home() / ".local" / "bin" / "mxm",
+]
+
+
+def find_mxm_exe() -> Path | None:
+    """Locate the installed MXM executable (the LMMS fork with native VST3)."""
+    for candidate in _MXM_CANDIDATE_EXES:
+        if candidate is not None and candidate.is_file():
+            return candidate
+    return None
+
+
 def get_plugins_dir() -> Path | None:
     """Return the plugins directory of the installed LMMS."""
     configured = os.environ.get("LMMS_PLUGIN_DIR")
@@ -139,6 +155,32 @@ def lmms_supports_carla() -> bool:
         return True
     options = get_lmms_build_options()
     return options.get("carla", False) or options.get("weakcarla", False)
+
+
+def get_mxm_build_options() -> dict[str, bool]:
+    """Return boolean build options reported by the MXM binary's ``--version``."""
+    exe = find_mxm_exe()
+    if exe is None:
+        return {}
+    try:
+        proc = subprocess.run(
+            [str(exe), "--version"], capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return {
+        name.lower(): value.upper() in {"TRUE", "ON", "1"}
+        for name, value in re.findall(
+            r"(?:MXM_|WANT_)([A-Z0-9_]+)=?'?([A-Z0-9]+)'?", out
+        )
+    }
+
+
+def mxm_supports_native_vst3() -> bool:
+    """Whether the installed MXM was built with native VST3 hosting."""
+    options = get_mxm_build_options()
+    return bool(options.get("have_vst3") or options.get("vst3"))
 
 
 def find_linux_plugins(directory: str | Path, recursive: bool = True) -> list[dict]:

@@ -188,11 +188,25 @@ e.g. SlicerT/Xpressive require LMMS 1.3+) and audio rendering.
 | Tool | Description |
 |------|-------------|
 | `list_available_plugins` | Dynamically list ALL installed plugins (incl. custom ones) |
-| `scan_vst_directory` | Find VST .dll files in a folder |
-| `add_vst_track` | Add a track hosting a VST plugin (Vestige) |
+| `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
+| `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
+| `scan_vst_directory` | Find legacy VST2 `.dll` files in a folder |
+| `add_vst_track` | Add a track hosting a legacy VST2 plugin (Vestige) |
 
 Custom LMMS plugins dropped into the plugins folder are detected
 automatically and can be used directly by name - no server update needed.
+
+**Native VST3 (MXM):** MXM hosts VST3 instruments natively through its
+`vst3instrument` plugin. Use `list_vst3_instruments` to find a plugin and
+`add_vst3_instrument_track` with its `module` path and 32-character `cid`
+to add it. This is MXM's own VST3 host and is completely separate from the
+Carla bridge - VST3 is never routed through Carla.
+
+The MCP discovers VST3 plugins from the same locations MXM scans:
+`$HOME/.vst3`, `/usr/lib64/vst3`, `/usr/lib/vst3`,
+`/usr/local/lib64/vst3`, `/usr/local/lib/vst3`, MXM's application `vst3`
+directory, plus `$VST3_PATH`. Set `MXM_VST3_PATH_ONLY=1` to restrict
+discovery to `$VST3_PATH`, exactly like MXM.
 
 ### Utilities
 
