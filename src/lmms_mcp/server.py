@@ -100,8 +100,8 @@ freeboy/nes/sid (chiptune), organic (pads/organ).
 Custom plugins: The user may have installed additional LMMS plugins or
  VSTs. Check list_available_plugins for dynamically detected custom
  plugins. On Linux, use add_carla_instrument_track and load_carla_plugin
- for installed plugins; Surge XT must use add_surge_xt_track, which targets
- the working LV2 build. Legacy VST .dll files remain available through
+ for installed plugins. Surge XT uses LMMS's native LV2 instrument host.
+ Legacy VST .dll files remain available through
  scan_vst_directory and add_vst_track.
 
 ZynAddSubFX: For rich sounds, add a track with instrument "zynaddsubfx",
@@ -487,6 +487,24 @@ def set_track_volume(track_index: int, volume: int) -> str:
 
 
 @mcp.tool()
+def set_track_mixer_channel(track_index: int, mixer_channel: int) -> str:
+    """Route an instrument or sample track to a mixer channel.
+
+    Sample tracks require mixch on the <sampletrack> element or they
+    stay on Master regardless of add_sample_track's mixer_channel arg.
+    """
+    proj = get_project()
+    try:
+        result = xml_parser.set_track_mixer_channel(
+            proj.root, track_index, mixer_channel
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    proj._modified = True
+    return json.dumps(result)
+
+
+@mcp.tool()
 def set_track_panning(track_index: int, panning: int) -> str:
     """Set the panning of a track.
 
@@ -751,11 +769,14 @@ def _resolve_fxchain_target(target_type: str, target_index: int) -> ET.Element:
     if target_type == "track":
         track = xml_parser.find_track_element(root, target_index)
         inst_track = track.find("instrumenttrack")
-        if inst_track is None:
-            raise ValueError(
-                f"Track {target_index} is not an instrument track"
-            )
-        return inst_track
+        if inst_track is not None:
+            return inst_track
+        sample_track = track.find("sampletrack")
+        if sample_track is not None:
+            return sample_track
+        raise ValueError(
+            f"Track {target_index} has no instrument or sample effect chain"
+        )
     if target_type == "mixer":
         song = root.find("song")
         mixer = song.find("mixer")
@@ -779,25 +800,27 @@ def add_effect(
     position: int | None = None,
     plugin_path: str = "",
     plugin_id: str = "",
+    params: dict | None = None,
 ) -> str:
     """Add an effect to a track's or mixer channel's effect chain.
+
+    Only effects with a complete known-valid control block are accepted.
+    Use describe_effect / lmms://reference/effects for parameters.
 
     Args:
         target_type: "track" or "mixer"
         target_index: Track index or mixer channel number (0=Master)
-        effect: Built-in LMMS effect name. Valid: amplifier, bassbooster,
-            bitcrush, compressor, crossovereq, delay, dispersion,
-            dualfilter, dynamicsprocessor, eq, flanger, frequencyshifter,
-            multitapecho, reverbsc, slewdistortion, stereoenhancer,
-            stereomatrix, waveshaper
+        effect: Built-in LMMS effect name with complete serialization
         wet: Wet/dry mix 0.0-1.0 (1.0=full effect)
         enabled: Whether the effect is active
         position: Chain position to insert at (None=end of chain)
+        params: Optional control overrides using the effect's LMMS names
     """
     try:
         parent = _resolve_fxchain_target(target_type, target_index)
         result = effects_mod.add_effect(parent, effect, wet, enabled, position,
-                                        plugin_path or None, plugin_id or None)
+                                        plugin_path or None, plugin_id or None,
+                                        params)
         available, reason = lmms_app.check_plugin_available(effect)
         if not available:
             # Custom effect plugin? (DLL exists but not in known list)
@@ -818,11 +841,13 @@ def add_effect(
                 if alternative:
                     reason += f" Consider '{alternative}' instead."
                 result["warning"] = reason
+        get_project()._modified = True
         return json.dumps(result)
     except ValueError as exc:
         return json.dumps({
             "error": str(exc),
-            "valid_effects": sorted(effects_mod.KNOWN_EFFECTS.keys()),
+            "valid_effects": sorted(effects_mod.EFFECT_SPECS.keys()),
+            "unsupported_effects": effects_mod.UNSUPPORTED_EFFECTS,
             "recommendations": effects_mod.EFFECT_RECOMMENDATIONS,
         })
 
@@ -896,6 +921,24 @@ def toggle_effect(
         return json.dumps(result)
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+def describe_effect(effect: str = "") -> str:
+    """Describe supported LMMS effects and their serializable controls.
+
+    Args:
+        effect: Optional effect name. Empty lists every supported effect,
+            accepted parameters, and effects that remain unsupported.
+    """
+    try:
+        return json.dumps(effects_mod.describe_effects(effect or None), indent=2)
+    except ValueError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "valid_effects": sorted(effects_mod.EFFECT_SPECS.keys()),
+            "unsupported_effects": effects_mod.UNSUPPORTED_EFFECTS,
+        })
 
 
 @mcp.tool()
@@ -1032,6 +1075,54 @@ def set_zyn_params(
         return json.dumps({"error": str(exc)})
 
 
+@mcp.tool()
+def set_instrument_filter(
+    track_index: int,
+    cutoff: float | None = None,
+    resonance: float | None = None,
+    wet: float | None = None,
+    ftype: int | None = None,
+) -> str:
+    """Set the built-in instrument-track filter (eldata).
+
+    cutoff Hz (fcut), resonance 0-10 (fres), wet 0-1 (fwet),
+    ftype: 0=lowpass, 1=highpass, 2=bandpass, 3=notch (LMMS enum).
+    Automate with add_automation target_type=track param=filter_cut.
+    """
+    proj = get_project()
+    try:
+        track = xml_parser.find_track_element(proj.root, track_index)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    inst = track.find("instrumenttrack")
+    if inst is None:
+        return json.dumps({"error": f"Track {track_index} is not an instrument track"})
+    eldata = inst.find("eldata")
+    if eldata is None:
+        return json.dumps({"error": f"Track {track_index} has no eldata filter"})
+    applied = {}
+    if cutoff is not None:
+        eldata.set("fcut", str(float(cutoff)))
+        applied["fcut"] = cutoff
+    if resonance is not None:
+        eldata.set("fres", str(float(resonance)))
+        applied["fres"] = resonance
+    if wet is not None:
+        eldata.set("fwet", str(float(wet)))
+        applied["fwet"] = wet
+    if ftype is not None:
+        eldata.set("ftype", str(int(ftype)))
+        applied["ftype"] = ftype
+    if not applied:
+        return json.dumps({"error": "No filter parameters provided"})
+    proj._modified = True
+    return json.dumps({
+        "track_index": track_index,
+        "applied": applied,
+        "message": f"Updated instrument filter on track {track_index}",
+    })
+
+
 # ──────────────────────────────────────────────────────────────────
 # LMMS APP INTEGRATION (VERSION CHECK + RENDER/EXPORT)
 # ──────────────────────────────────────────────────────────────────
@@ -1061,7 +1152,7 @@ def get_lmms_info() -> str:
         if lmms_app.check_plugin_available(i)[0]
     ]
     eff_available = [
-        e for e in effects_mod.KNOWN_EFFECTS
+        e for e in effects_mod.EFFECT_SPECS
         if lmms_app.check_plugin_available(e)[0]
     ]
     return json.dumps({
@@ -1071,6 +1162,8 @@ def get_lmms_info() -> str:
         "plugin_count": len(installed),
         "instruments_verified_available": inst_available,
         "effects_verified_available": eff_available,
+        "effects_serializable": sorted(effects_mod.EFFECT_SPECS.keys()),
+        "effects_unsupported": effects_mod.UNSUPPORTED_EFFECTS,
         "all_installed_plugins": installed,
     }, indent=2)
 
@@ -1224,8 +1317,7 @@ def load_carla_plugin(
 ) -> str:
     """Load an installed VST3, CLAP, or LV2 plugin into a Carla track.
 
-    Surge XT is intentionally LV2-only on this Linux installation; use
-    add_surge_xt_track so its reference Carla state is embedded.
+    Surge XT uses LMMS's native LV2 instrument host; use add_surge_xt_track.
     """
     try:
         result = xml_parser.load_carla_plugin(get_project().root, track_index,
@@ -1244,35 +1336,78 @@ def add_surge_xt_track(
     volume: int = 100,
     panning: int = 0,
 ) -> str:
-    """Add a Carla Rack track using the working Surge XT LV2 serialization.
-
-    The generated project uses the exact URI and Carla state from the known
-    working LMMS project. CLAP and VST3 Surge builds are not accepted.
-    """
+    """Add Surge XT using LMMS's native LV2 instrument host."""
     path = Path(lv2_path)
     if not path.is_dir() or path.suffix.lower() != ".lv2":
         return json.dumps({"error": f"Surge XT LV2 bundle not found: {lv2_path}"})
-    if not lmms_app.lmms_supports_carla():
-        return json.dumps({"error": "Installed LMMS does not expose Carla plugins"})
     project = get_project()
     result = project.add_track(
-        "instrument", name, instrument="carlarack",
+        "instrument", name, instrument="lv2instrument",
         mixer_channel=mixer_channel, volume=volume, panning=panning,
     )
-    xml_parser.configure_reference_carla_track(
-        xml_parser.find_track_element(project.root, result["track_index"])
-    )
     try:
-        loaded = xml_parser.load_carla_plugin(
-            project.root, result["track_index"], path,
+        xml_parser.configure_native_lv2_instrument(
+            xml_parser.find_track_element(project.root, result["track_index"]),
             xml_parser.SURGE_XT_LV2_URI,
         )
-    except (ValueError, OSError, RuntimeError) as exc:
+    except ValueError as exc:
         return json.dumps({"error": str(exc)})
     project._modified = True
-    result.update({"bridge": "carlarack", "plugin": loaded["plugin"],
-                   "plugin_type": loaded["plugin_type"],
-                   "plugin_id": loaded["plugin_id"]})
+    result.update({"host": "lv2instrument", "plugin": str(path),
+                   "plugin_type": "LV2",
+                   "plugin_id": xml_parser.SURGE_XT_LV2_URI})
+    return json.dumps(result)
+
+
+@mcp.tool()
+def add_talking_bass_track(
+    name: str = "Talking Bass",
+    mixer_channel: int = 0,
+    volume: int = 100,
+    panning: int = 0,
+    vowel: float = 0.15,
+    lfo_hz: float = 4.0,
+    lfo_amt: float = 0.35,
+    split_hz: float = 140.0,
+    drive: float = 0.35,
+) -> str:
+    """Add a MIDI talking/ram bass using LMMS's native LV2 instrument host.
+
+    talkingbass.lv2 is an InstrumentPlugin (MIDI in, stereo out). Hosting it as
+    lv2effect crashes LMMS. Requires ~/.lv2/talkingbass.lv2
+    (make -C lmms-mcp/plugins/talkingbass install).
+    """
+    bundle = Path(xml_parser.TALKINGBASS_LV2_BUNDLE)
+    if not (bundle / "talkingbass.so").is_file():
+        return json.dumps({
+            "error": f"Talking Bass LV2 not installed at {bundle}",
+            "hint": "Run: make -C lmms-mcp/plugins/talkingbass install",
+        })
+    proj = get_project()
+    result = proj.add_track(
+        "instrument", name, instrument="lv2instrument",
+        mixer_channel=mixer_channel, volume=volume, panning=panning,
+    )
+    idx = result["track_index"]
+    try:
+        xml_parser.configure_native_lv2_instrument(
+            xml_parser.find_track_element(proj.root, idx),
+            xml_parser.TALKINGBASS_LV2_URI,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    proj._modified = True
+    result.update({
+        "host": "lv2instrument",
+        "plugin": str(bundle),
+        "plugin_type": "LV2",
+        "plugin_id": xml_parser.TALKINGBASS_LV2_URI,
+        "vowel": vowel, "lfo_hz": lfo_hz, "lfo_amt": lfo_amt,
+        "split_hz": split_hz, "drive": drive,
+        "note": "Play MIDI on this track. Plugin synthesizes its own saw/sub. "
+                "Open the LV2 UI in LMMS to tweak vowel/LFO if XML port state is not restored.",
+        "message": f"Added talking bass track '{name}' at index {idx}",
+    })
     return json.dumps(result)
 
 
@@ -1401,6 +1536,31 @@ def assign_sample_file(track_index: int, file_path: str) -> str:
         })
     except (ValueError, IndexError) as exc:
         return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+def set_audiofileprocessor_sample(
+    track_index: int,
+    file_path: str,
+    amp: int = 100,
+    looped: bool = False,
+    reversed: bool = False,
+) -> str:
+    """Load a WAV/OGG into an audiofileprocessor instrument track.
+
+    Use this for one-shot drums and hits triggered by MIDI notes.
+    Sample tracks still use assign_sample_file / place_sample_clip.
+    """
+    proj = get_project()
+    try:
+        result = xml_parser.set_audiofileprocessor_sample(
+            proj.root, track_index, file_path, amp=amp,
+            looped=looped, reversed=reversed,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    proj._modified = True
+    return json.dumps(result)
 
 
 @mcp.tool()
@@ -1582,6 +1742,7 @@ def add_automation(
     - song + tempo: Song BPM (e.g. tempo ramps)
     - song + master_volume / master_pitch
     - track + volume / panning (target_index = track index)
+    - track + filter_cut / filter_res / filter_wet (instrument eldata)
     - mixer + volume (target_index = mixer channel number)
 
     Args:
@@ -1860,14 +2021,11 @@ def resource_instruments() -> str:
 def resource_effects() -> str:
     """List of available LMMS effects (built-in, verified)."""
     return json.dumps({
-        "note": "These are ALL built-in LMMS effects. External-host "
-                "effects (ladspaeffect, lv2effect, vsteffect) depend on "
-                "system plugins and should be avoided.",
-        "effects": [
-            {"name": name, "description": desc, "controls_node": node}
-            for name, (desc, node) in sorted(KNOWN_EFFECTS.items())
-        ],
-        "recommendations_by_use_case": EFFECT_RECOMMENDATIONS,
+        "note": "Only effects listed as supported have complete LMMS 1.3 "
+                "control serialization. Never enable an effect that cannot "
+                "serialize a full control block. External-host effects "
+                "(ladspaeffect, lv2effect, vsteffect) depend on system plugins.",
+        **effects_mod.describe_effects(),
     }, indent=2)
 
 
@@ -1924,8 +2082,8 @@ def create_basic_song(
 
 Steps:
 1. Create a new project with {bpm} BPM
-2. Add an instrument track "Drums" with kicker or audiofileprocessor
-3. Add an instrument track "Bass" with tripleoscillator or LB302
+2. Add audiofileprocessor drum tracks and set_audiofileprocessor_sample
+3. Add bass with add_talking_bass_track or Surge XT; route with set_track_mixer_channel
 4. Add an instrument track "Melody" with tripleoscillator or watsyn
 5. Add an automation track for volume/parameter automation
 6. Add notes to each track following {genre} conventions

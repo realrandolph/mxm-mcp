@@ -40,6 +40,7 @@ desktop.ini
 *.mmp
 !tests/fixtures/*.mmp
 !validation_lmms13_native_carla_surge.mmp
+!validation_native_surge_xt.mmp
 *.mpt
 
 # opencode
@@ -48,3 +49,7 @@ opencode.json
 # Secrets
 .env
 .env.local
+
+# Generated plugin/audio artifacts
+plugins/**/*.so
+validation_effect_controls.wav

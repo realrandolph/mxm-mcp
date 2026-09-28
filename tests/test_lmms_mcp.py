@@ -290,7 +290,24 @@ class TestEffects:
         assert len(effects) == 2
         assert effects[0]["name"] == "delay"
         assert effects[0]["wet"] == 0.7
+        assert effects[0]["controls_node"] == "Delay"
         assert effects[1]["enabled"] is False
+
+    def test_effect_on_wet_have_unique_ids(self):
+        from lmms_mcp.effects import add_effect
+        root = self._make_project()
+        track = find_tracks(root)[0]
+        add_effect(track, "delay")
+        add_effect(track, "eq")
+        ids = []
+        for effect in track.findall("fxchain/effect"):
+            on = effect.find("on")
+            wet = effect.find("wet")
+            assert on is not None and wet is not None
+            assert on.get("id") not in {None, "0"}
+            assert wet.get("id") not in {None, "0"}
+            ids.extend([on.get("id"), wet.get("id")])
+        assert len(ids) == len(set(ids))
 
     def test_toggle_effect(self):
         from lmms_mcp.effects import add_effect, set_effect_enabled
@@ -314,6 +331,169 @@ class TestEffects:
         eff = fxchain.find("effect")
         assert eff.get("name") == "reverbsc"
         Path(path).unlink()
+
+
+class TestEffectControlSerialization:
+    """Each supported effect must emit complete LMMS 1.3 control state."""
+
+    CANONICAL_KEYS = {
+        "bassbooster": {"freq", "ratio", "gain"},
+        "bitcrush": {
+            "ingain", "innoise", "outgain", "outclip", "rate",
+            "stereodiff", "levels", "rateon", "depthon",
+        },
+        "compressor": {
+            "threshold", "ratio", "attack", "release", "knee", "hold", "range",
+            "rms", "peakmode", "limiter", "feedback", "autoAttack", "autoRelease",
+            "autoMakeup", "audition", "lookahead", "lookaheadLength", "mix",
+            "blend", "tilt", "tiltFreq", "stereoLink", "midside", "inGain",
+            "outGain", "inBalance", "outBalance", "stereoBalance",
+        },
+        "delay": {
+            "DelayTimeSamples", "DelayTimeSamples_syncmode",
+            "DelayTimeSamples_numerator", "DelayTimeSamples_denominator",
+            "FeebackAmount", "LfoFrequency", "LfoFrequency_syncmode",
+            "LfoFrequency_numerator", "LfoFrequency_denominator",
+            "LfoAmount", "LfoAmount_syncmode", "LfoAmount_numerator",
+            "LfoAmount_denominator", "OutGain",
+        },
+        "dualfilter": {
+            "enabled1", "filter1", "cut1", "res1", "gain1", "mix",
+            "enabled2", "filter2", "cut2", "res2", "gain2",
+        },
+        "dynamicsprocessor": {
+            "inputGain", "outputGain", "attack", "release", "stereoMode", "waveShape",
+        },
+        "eq": {
+            "Inputgain", "Outputgain", "HPactive", "HPfreq", "HPres", "HP",
+            "HP12", "HP24", "HP48", "Lowshelfactive", "LowShelffreq",
+            "Lowshelfgain", "LowShelfres", "Peak1active", "Peak1freq",
+            "Peak1gain", "Peak1bw", "Peak2active", "Peak2freq", "Peak2gain",
+            "Peak2bw", "Peak3active", "Peak3freq", "Peak3gain", "Peak3bw",
+            "Peak4active", "Peak4freq", "Peak4gain", "Peak4bw",
+            "Highshelfactive", "Highshelffreq", "HighShelfgain", "HighShelfres",
+            "LPactive", "LPfreq", "LPres", "LP", "LP12", "LP24", "LP48",
+            "AnalyseIn", "AnalyseOut",
+        },
+        "flanger": {
+            "DelayTimeSamples", "LfoFrequency", "LfoFrequency_syncmode",
+            "LfoFrequency_numerator", "LfoFrequency_denominator", "LfoAmount",
+            "LfoPhase", "Feedback", "WhiteNoise", "Invert",
+        },
+        "reverbsc": {"input_gain", "size", "color", "output_gain"},
+        "stereoenhancer": {"width"},
+        "waveshaper": {"inputGain", "outputGain", "clipInput", "waveShape"},
+    }
+
+    NONDEFAULTS = {
+        "amplifier": {"volume": 80, "pan": -20},
+        "bassbooster": {"freq": 80, "gain": 1.5},
+        "bitcrush": {"rate": 12000, "levels": 32},
+        "compressor": {"threshold": -16, "ratio": 4},
+        "crossovereq": {"xover12": 200, "gain1": -3},
+        "delay": {"DelayTimeSamples": 0.25, "FeebackAmount": 0.35},
+        "dispersion": {"amount": 8, "freq": 400},
+        "dualfilter": {"cut1": 1200, "mix": 0.4, "filter1": 1},
+        "dynamicsprocessor": {"inputGain": 1.2, "attack": 20},
+        "eq": {"Peak1active": 1, "Peak1gain": 3.5, "Peak1freq": 200},
+        "flanger": {"Feedback": 0.4, "LfoFrequency": 0.5},
+        "frequencyshifter": {"freqShift": 40, "mix": 0.5},
+        "multitapecho": {"steps": 8, "steplength": 150},
+        "reverbsc": {"size": 0.6, "color": 8000},
+        "slewdistortion": {"drive1": 0.4, "mix1": 0.8},
+        "stereoenhancer": {"width": 45},
+        "stereomatrix": {"l-r": 0.2, "r-l": 0.2},
+        "waveshaper": {"inputGain": 1.4, "clipInput": 1},
+    }
+
+    def _track(self):
+        root = create_empty_project()
+        add_instrument_track(root, "Lead")
+        return find_tracks(root)[0]
+
+    def _controls(self, track, name):
+        from lmms_mcp.effects import EFFECT_SPECS
+        effect = track.find("instrumenttrack/fxchain/effect") or track.find("fxchain/effect")
+        assert effect is not None
+        assert effect.get("name") == name
+        assert effect.find("key") is not None
+        controls = effect.find(EFFECT_SPECS[name].controls_tag)
+        assert controls is not None
+        assert controls.attrib, f"{name} control block is empty"
+        return controls
+
+    def test_every_supported_effect_has_complete_nondefault_state(self):
+        from lmms_mcp.effects import EFFECT_SPECS, add_effect
+        for name, spec in EFFECT_SPECS.items():
+            root = create_empty_project()
+            add_instrument_track(root, name)
+            track = find_tracks(root)[0]
+            result = add_effect(track, name, params=self.NONDEFAULTS[name])
+            controls = self._controls(track, name)
+            expected = {param.name for param in spec.params}
+            assert expected <= set(controls.attrib)
+            for key, value in self.NONDEFAULTS[name].items():
+                actual = controls.get(key)
+                assert actual is not None
+                param = next(item for item in spec.params if item.name == key)
+                if param.kind == "data":
+                    assert actual
+                elif param.kind == "bool":
+                    assert actual == ("1" if value else "0")
+                else:
+                    assert float(actual) == pytest.approx(float(value))
+            assert result["controls"][spec.params[0].name]
+
+    def test_canonical_keys_match_lmms_saved_effects(self):
+        from lmms_mcp.effects import add_effect
+        for name, keys in self.CANONICAL_KEYS.items():
+            track = self._track()
+            add_effect(track, name)
+            controls = self._controls(track, name)
+            assert keys <= set(controls.attrib)
+
+    def test_delay_and_flanger_write_tempo_sync_attrs(self):
+        from lmms_mcp.effects import add_effect
+        track = self._track()
+        add_effect(track, "delay", params={"DelayTimeSamples": 0.33})
+        delay = self._controls(track, "delay")
+        assert delay.get("DelayTimeSamples_syncmode") == "0"
+        assert delay.get("DelayTimeSamples_numerator") == "4"
+        assert float(delay.get("DelayTimeSamples")) == pytest.approx(0.33)
+
+    def test_waveshaper_and_dynamics_use_200_point_transfer(self):
+        import base64
+        import struct
+        from lmms_mcp.effects import add_effect
+        for name in ("waveshaper", "dynamicsprocessor"):
+            track = self._track()
+            add_effect(track, name)
+            blob = self._controls(track, name).get("waveShape")
+            samples = struct.unpack("<200f", base64.b64decode(blob))
+            assert samples[0] == pytest.approx(1 / 200)
+            assert samples[-1] == pytest.approx(1.0)
+
+    def test_unknown_parameter_is_rejected(self):
+        from lmms_mcp.effects import add_effect
+        track = self._track()
+        with pytest.raises(ValueError, match="Unknown delay parameter"):
+            add_effect(track, "delay", params={"not_a_real_knob": 1})
+
+    def test_out_of_range_parameter_is_rejected(self):
+        from lmms_mcp.effects import add_effect
+        track = self._track()
+        with pytest.raises(ValueError, match="below minimum"):
+            add_effect(track, "reverbsc", params={"size": -1})
+
+    def test_describe_effects_lists_parameters(self):
+        from lmms_mcp.effects import describe_effects
+        catalog = describe_effects()
+        names = {item["name"] for item in catalog["supported"]}
+        assert "dynamicsprocessor" in names
+        assert "waveshaper" in names
+        delay = describe_effects("delay")["effect"]
+        param_names = {item["name"] for item in delay["parameters"]}
+        assert "FeebackAmount" in param_names
 
 
 class TestZynAddSubFX:
@@ -733,40 +913,43 @@ class TestCustomPluginsAndVst:
             found = lmms_app.find_linux_plugins(root)
             assert {p["type"] for p in found} == {"vst3", "clap", "lv2", "ladspa"}
 
-    def test_carla_track_and_surge_lv2_round_trip(self):
+    def test_native_surge_lv2_round_trip(self):
         from lmms_mcp import server as srv
         from lmms_mcp.project import LMMSProject
         from lmms_mcp import xml_parser
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
-        if not srv.lmms_app.lmms_supports_carla():
-            pytest.skip("LMMS build does not expose Carla")
         lv2 = Path("/usr/lib/lv2/Surge XT.lv2")
         if not lv2.is_dir():
             pytest.skip("Surge XT LV2 not installed")
         response = json.loads(srv.add_surge_xt_track("Surge", str(lv2)))
-        assert response["bridge"] == "carlarack"
+        assert response["host"] == "lv2instrument"
         assert response["plugin_type"] == "LV2"
         assert response["plugin_id"] == xml_parser.SURGE_XT_LV2_URI
-        state = find_tracks(proj.root)[0].find("instrumenttrack/instrument/carlarack/CARLA-PROJECT")
-        assert state.get("VERSION") == "2.5"
-        assert state.findtext("Plugin/Info/Type") == "LV2"
-        assert state.findtext("Plugin/Info/Name") == "Surge XT"
-        assert state.findtext("Plugin/Info/URI") == xml_parser.SURGE_XT_LV2_URI
-        assert state.findtext("Plugin/Data/Active") == "Yes"
-        assert state.findtext("Plugin/Data/ControlChannel") == "1"
-        assert state.findtext("Plugin/Data/Options") == "0x3f1"
-        assert state.findtext("Plugin/Data/CustomData/Key").endswith(":StateString")
-        assert len(state.findtext("Plugin/Data/CustomData/Value")) > 70000
+        instrument = find_tracks(proj.root)[0].find("instrumenttrack/instrument")
+        assert instrument.get("name") == "lv2instrument"
+        controls = instrument.find("lv2controls")
+        assert controls.find("models").attrib == {"freeWheeling": "0", "enabled": "1"}
+        assert controls.find("lv2state") is None
+        uri = controls.find("key/attribute[@name='uri']")
+        assert uri.get("value") == xml_parser.SURGE_XT_LV2_URI
+        assert instrument.find("carlarack") is None
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "carla.mmp"
             proj.add_note(0, key=60, pos=0, length=96)
             proj.save(path, compressed=False)
             loaded = xml_parser.load_project(path)
-            assert loaded.find(".//CARLA-PROJECT/Plugin/Info/Type").text == "LV2"
-            assert loaded.find(".//CARLA-PROJECT/Plugin/Info/URI").text == xml_parser.SURGE_XT_LV2_URI
+            assert loaded.find(".//instrument[@name='lv2instrument']") is not None
+            assert loaded.find(".//lv2controls/key/attribute[@name='uri']").get("value") == xml_parser.SURGE_XT_LV2_URI
             assert loaded.find(".//track[@name='Surge']/midiclip/note").get("key") == "60"
+
+    def test_native_lv2_instrument_requires_uri(self):
+        from lmms_mcp.xml_parser import configure_native_lv2_instrument
+        root = create_empty_project()
+        track = add_instrument_track(root, "LV2", instrument="lv2instrument")
+        with pytest.raises(ValueError, match="require.*URI"):
+            configure_native_lv2_instrument(track, "not-a-uri")
 
     def test_carla_rejects_unknown_plugin_identifier(self):
         from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
@@ -817,6 +1000,37 @@ class TestCustomPluginsAndVst:
         effect = track.find("fxchain/effect")
         assert effect.get("name") == "ladspaeffect"
         assert effect.find("key/attribute[@name='file']").get("value") == "ZamComp"
+        assert effect.find("on").get("id") not in {None, "0"}
+        assert effect.find("wet").get("id") not in {None, "0"}
+        assert effect.find("on").get("id") != effect.find("wet").get("id")
+
+    def test_talkingbass_rejected_as_lv2effect(self):
+        from lmms_mcp.effects import add_external_effect
+        from lmms_mcp.xml_parser import TALKINGBASS_LV2_URI
+        root = create_empty_project()
+        add_instrument_track(root, "Lead")
+        track = find_tracks(root)[0].find("instrumenttrack")
+        with pytest.raises(ValueError, match="lv2instrument"):
+            add_external_effect(track, "lv2effect", {"uri": TALKINGBASS_LV2_URI})
+
+    def test_talking_bass_track_hosts_native_lv2(self, tmp_path, monkeypatch):
+        from lmms_mcp import server as srv
+        from lmms_mcp.project import LMMSProject
+        from lmms_mcp import xml_parser
+        (tmp_path / "talkingbass.so").write_bytes(b"plugin")
+        monkeypatch.setattr(xml_parser, "TALKINGBASS_LV2_BUNDLE", str(tmp_path))
+        proj = LMMSProject()
+        proj.new()
+        srv.set_project(proj)
+        response = json.loads(srv.add_talking_bass_track("TalkBass"))
+        assert "error" not in response
+        assert response["host"] == "lv2instrument"
+        assert response["plugin_id"] == xml_parser.TALKINGBASS_LV2_URI
+        instrument = find_tracks(proj.root)[0].find("instrumenttrack/instrument")
+        assert instrument.get("name") == "lv2instrument"
+        uri = instrument.find("lv2controls/key/attribute[@name='uri']")
+        assert uri.get("value") == xml_parser.TALKINGBASS_LV2_URI
+        assert proj.root.find(".//effect[@name='lv2effect']") is None
 
 
 class TestSilenceRegressions:
@@ -833,6 +1047,23 @@ class TestSilenceRegressions:
         assert send is not None
         assert send.get("channel") == "0"
         assert float(send.get("amount")) > 0
+
+    def test_master_routing_repairs_missing_and_zero_sends(self):
+        from lmms_mcp.xml_parser import add_mixer_channel, ensure_master_routing
+        root = create_empty_project()
+        missing = add_mixer_channel(root, "Missing")
+        missing.remove(missing.find("send"))
+        zero = add_mixer_channel(root, "Zero")
+        zero.find("send").set("amount", "0")
+
+        assert ensure_master_routing(root) == 2
+        assert missing.find("send").attrib == {"channel": "0", "amount": "1"}
+        assert zero.find("send").get("amount") == "1"
+
+    def test_instrument_track_defaults_directly_to_master(self):
+        root = create_empty_project()
+        track = add_instrument_track(root, "Lead")
+        assert track.find("instrumenttrack").get("mixch") == "0"
 
     def test_note_beyond_pattern_len_extends_clip(self):
         """LMMS does not play notes outside a pattern clip's window;
@@ -920,6 +1151,64 @@ class TestSilenceRegressions:
             proj.save(mmpz)
             assert Path(mmp).read_bytes().startswith(b"<?xml")
             assert not Path(mmpz).read_bytes().startswith(b"<?xml")
+
+
+class TestRoutingAndTalkingBass:
+    def test_sample_track_writes_mixch(self):
+        root = create_empty_project()
+        add_sample_track(root, "Kick", mixer_channel=3, volume=90)
+        st = find_tracks(root)[0].find("sampletrack")
+        assert st.get("mixch") == "3"
+        assert st.get("vol") == "90"
+
+    def test_set_track_mixer_channel_sample_and_instrument(self):
+        from lmms_mcp.xml_parser import set_track_mixer_channel
+        root = create_empty_project()
+        add_instrument_track(root, "Bass", mixer_channel=0)
+        add_sample_track(root, "Snare", mixer_channel=0)
+        set_track_mixer_channel(root, 0, 2)
+        set_track_mixer_channel(root, 1, 4)
+        assert find_tracks(root)[0].find("instrumenttrack").get("mixch") == "2"
+        assert find_tracks(root)[1].find("sampletrack").get("mixch") == "4"
+
+    def test_set_audiofileprocessor_sample(self):
+        from lmms_mcp.xml_parser import set_audiofileprocessor_sample
+        root = create_empty_project()
+        add_instrument_track(root, "Kick", instrument="audiofileprocessor")
+        result = set_audiofileprocessor_sample(
+            root, 0, "/tmp/kick.wav", amp=80, looped=False
+        )
+        afp = find_tracks(root)[0].find(
+            "instrumenttrack/instrument/audiofileprocessor"
+        )
+        assert afp.get("src") == "/tmp/kick.wav"
+        assert afp.get("amp") == "80"
+        assert result["src"] == "/tmp/kick.wav"
+
+    def test_talking_bass_oscillator_saw_sub(self):
+        from lmms_mcp.xml_parser import configure_talking_bass_oscillator
+        root = create_empty_project()
+        add_instrument_track(root, "TB")
+        configure_talking_bass_oscillator(root, 0)
+        osc = find_tracks(root)[0].find(
+            "instrumenttrack/instrument/tripleoscillator"
+        )
+        assert osc.get("wavetype0") == "1"
+        assert osc.get("coarse2") == "-24"
+        elvol = find_tracks(root)[0].find("instrumenttrack/eldata/elvol")
+        assert elvol.get("amt") == "1"
+
+    def test_filter_cut_automation_target(self):
+        from lmms_mcp.xml_parser import resolve_automation_target
+        root = create_empty_project()
+        add_instrument_track(root, "Bass")
+        model_id, value = resolve_automation_target(
+            root, "track", 0, "filter_cut"
+        )
+        assert model_id > 0
+        assert value == 14000.0
+        eldata = find_tracks(root)[0].find("instrumenttrack/eldata")
+        assert eldata.find("fcut") is not None
 
 
 if __name__ == "__main__":

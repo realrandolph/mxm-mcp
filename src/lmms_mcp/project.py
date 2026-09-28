@@ -212,6 +212,7 @@ class LMMSProject:
         if sample_elem is not None:
             track.volume = int(sample_elem.get("vol", "100"))
             track.panning = int(sample_elem.get("pan", "0"))
+            track.mixer_channel = int(float(sample_elem.get("mixch", "0")))
 
     def _parse_mixer_channels(self) -> list[MixerChannel]:
         """Parse all mixer channels."""

@@ -6,6 +6,9 @@ An MCP (Model Context Protocol) server for [LMMS](https://lmms.io/) - the free, 
 
 - **Create & save** LMMS projects (`.mmpz` compressed, `.mmp` XML)
 - **Add tracks**: Instrument, Sample, Pattern (Beat/Bassline), Automation
+- **Talking Bass**: `add_talking_bass_track` (native `lv2instrument`; `make -C plugins/talkingbass install`)
+- **AFP samples**: `set_audiofileprocessor_sample` for MIDI one-shots
+- **Mixer routing**: `set_track_mixer_channel` (sample tracks write `mixch`)
 - **Add notes** with MIDI key, position, velocity, and panning
 - **Effects**: 18 built-in effects on tracks and mixer channels (delay, reverb, EQ, compressor...)
 - **ZynAddSubFX presets**: Load any of ~950 factory instruments (.xiz), tune parameters

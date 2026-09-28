@@ -1,6 +1,5 @@
 """XML parser for LMMS .mmpz and .mmp project files."""
 
-import base64
 import struct
 import zlib
 from pathlib import Path
@@ -77,6 +76,7 @@ def save_project(path: str | Path, root: ET.Element, compressed: bool = True) ->
     Otherwise writes plain .mmp XML.
     """
     path = Path(path)
+    ensure_master_routing(root)
     ET.indent(root, space="  ")
     xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
     xml_str = '<?xml version="1.0"?>\n<!DOCTYPE lmms-project>\n' + xml_str
@@ -378,7 +378,8 @@ def add_instrument_track(
 
 
 SURGE_XT_LV2_URI = "https://surge-synthesizer.github.io/lv2/surge-xt"
-_SURGE_XT_STATE_FILE = Path(__file__).with_name("carla_surge_state.b64")
+TALKINGBASS_LV2_URI = "https://opencode.local/lv2/talkingbass"
+TALKINGBASS_LV2_BUNDLE = str(Path.home() / ".lv2" / "talkingbass.lv2")
 
 _CARLA_ENGINE_SETTINGS = {
     "ForceStereo": "false",
@@ -398,13 +399,23 @@ _CARLA_ENGINE_SETTINGS = {
 }
 
 
-def _surge_xt_state_string() -> str:
-    """Return the exact Surge XT state captured from the working project."""
-    try:
-        encoded = _SURGE_XT_STATE_FILE.read_text(encoding="ascii")
-        return zlib.decompress(base64.b64decode(encoded)).decode("utf-8")
-    except (OSError, ValueError, zlib.error) as exc:
-        raise RuntimeError("Packaged Carla/Surge XT state is unavailable") from exc
+def configure_native_lv2_instrument(track: ET.Element, plugin_uri: str) -> None:
+    """Configure an instrument track for LMMS's native LV2 instrument host."""
+    uri = plugin_uri.strip()
+    if not uri.startswith(("http://", "https://", "urn:")):
+        raise ValueError("Native LV2 instruments require a plugin URI")
+
+    instrument = track.find("instrumenttrack/instrument")
+    if instrument is None:
+        raise ValueError("Track has no instrument")
+    instrument.set("name", "lv2instrument")
+    for child in list(instrument):
+        instrument.remove(child)
+
+    controls = ET.SubElement(instrument, "lv2controls")
+    ET.SubElement(controls, "models", {"freeWheeling": "0", "enabled": "1"})
+    key = ET.SubElement(controls, "key")
+    ET.SubElement(key, "attribute", {"name": "uri", "value": uri})
 
 
 def _carla_plugin_type(path: Path) -> str:
@@ -454,11 +465,9 @@ def _carla_state(path: Path, plugin_id: str = "") -> ET.Element:
     ET.SubElement(data, "Options").text = "0x3f1" if (
         plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI
     ) else "0x0"
-    if plugin_type == "LV2" and identifier == SURGE_XT_LV2_URI:
-        custom = ET.SubElement(data, "CustomData")
-        ET.SubElement(custom, "Type").text = "http://lv2plug.in/ns/ext/atom#String"
-        ET.SubElement(custom, "Key").text = f"{SURGE_XT_LV2_URI}:StateString"
-        ET.SubElement(custom, "Value").text = _surge_xt_state_string()
+    # Surge's opaque StateString is optional.  Replaying it makes the LV2
+    # instance silent after LMMS 1.3 saves and reloads it; Carla can restore
+    # the fresh LV2 instance from its URI and the fields above.
     return state
 
 
@@ -579,6 +588,7 @@ def add_sample_track(
     sample_track = ET.SubElement(track, "sampletrack", {
         "pan": str(panning),
         "vol": str(volume),
+        "mixch": str(mixer_channel),
     })
     ET.SubElement(sample_track, "fxchain", {
         "numofeffects": "0", "enabled": "0",
@@ -783,6 +793,34 @@ def add_mixer_channel(
     ET.SubElement(channel, "send", {"channel": "0", "amount": "1"})
 
     return channel
+
+
+def ensure_master_routing(root: ET.Element) -> int:
+    """Ensure every non-Master mixer channel has a usable route to Master."""
+    channels = find_mixer_channels(root)
+    by_num = {int(channel.get("num", "0")): channel for channel in channels}
+    master = by_num.get(0)
+    if master is None:
+        raise ValueError("Mixer has no Master channel")
+
+    master.set("muted", "0")
+    master.set("soloed", "0")
+    if float(master.get("volume", "1")) <= 0:
+        master.set("volume", "1")
+
+    repaired = 0
+    for num, channel in by_num.items():
+        if num == 0:
+            continue
+        sends = channel.findall("send")
+        master_sends = [send for send in sends if send.get("channel") == "0"]
+        if not master_sends:
+            ET.SubElement(channel, "send", {"channel": "0", "amount": "1"})
+            repaired += 1
+        elif all(float(send.get("amount", "0")) <= 0 for send in master_sends):
+            master_sends[0].set("amount", "1")
+            repaired += 1
+    return repaired
 
 
 def set_head_attribute(root: ET.Element, attr: str, value: str) -> None:
@@ -1175,8 +1213,17 @@ def resolve_automation_target(
         if param == "panning":
             value = parent.get(pan_attr, "0")
             return automate_attribute(parent, pan_attr, value), float(value)
+        if inst_track is not None and param in {"filter_cut", "filter_res", "filter_wet"}:
+            eldata = inst_track.find("eldata")
+            if eldata is None:
+                raise ValueError(f"Track {target_index} has no filter (eldata)")
+            attr = {"filter_cut": "fcut", "filter_res": "fres", "filter_wet": "fwet"}[param]
+            default = {"fcut": "14000", "fres": "0.5", "fwet": "0"}[attr]
+            value = eldata.get(attr, default)
+            return automate_attribute(eldata, attr, value), float(value)
         raise ValueError(
-            f"Unknown track parameter '{param}'. Valid: volume, panning"
+            f"Unknown track parameter '{param}'. Valid: volume, panning, "
+            f"filter_cut, filter_res, filter_wet"
         )
 
     if target_type == "mixer":
@@ -1318,3 +1365,103 @@ def embed_zyn_preset(
         "message": f"Loaded ZynAddSubFX preset '{patch_name}' into track "
                    f"{track_index}",
     }
+
+
+def set_track_mixer_channel(root: ET.Element, track_index: int, mixer_channel: int) -> dict:
+    """Route an instrument or sample track to a mixer channel (mixch)."""
+    track = find_track_element(root, track_index)
+    ttype = get_track_type(track)
+    if ttype == 0:
+        node = track.find("instrumenttrack")
+        if node is None:
+            raise ValueError(f"Track {track_index} has no instrumenttrack")
+        node.set("mixch", str(int(mixer_channel)))
+        node.set("fxch", str(int(mixer_channel)))
+    elif ttype == 2:
+        node = track.find("sampletrack")
+        if node is None:
+            raise ValueError(f"Track {track_index} has no sampletrack")
+        node.set("mixch", str(int(mixer_channel)))
+    else:
+        raise ValueError(
+            f"Track {track_index} type {ttype} cannot be routed to the mixer"
+        )
+    return {
+        "track_index": track_index,
+        "mixer_channel": int(mixer_channel),
+        "message": f"Routed track {track_index} to mixer channel {mixer_channel}",
+    }
+
+
+def set_audiofileprocessor_sample(
+    root: ET.Element,
+    track_index: int,
+    file_path: str,
+    amp: int = 100,
+    looped: bool = False,
+    reversed: bool = False,
+) -> dict:
+    """Set the sample file on an audiofileprocessor instrument track."""
+    track = find_track_element(root, track_index)
+    inst = track.find("instrumenttrack/instrument")
+    if inst is None or inst.get("name") != "audiofileprocessor":
+        actual = inst.get("name") if inst is not None else "none"
+        raise ValueError(
+            f"Track {track_index} uses '{actual}', not 'audiofileprocessor'"
+        )
+    afp = inst.find("audiofileprocessor")
+    if afp is None:
+        afp = ET.SubElement(inst, "audiofileprocessor")
+        ET.SubElement(afp, "key")
+    path = Path(file_path)
+    afp.set("src", str(path))
+    afp.set("amp", str(int(amp)))
+    afp.set("looped", "1" if looped else "0")
+    afp.set("reversed", "1" if reversed else "0")
+    afp.set("stutter", afp.get("stutter", "0"))
+    afp.set("interp", afp.get("interp", "1"))
+    afp.set("sframe", afp.get("sframe", "0"))
+    afp.set("lframe", afp.get("lframe", "0"))
+    afp.set("eframe", afp.get("eframe", "1"))
+    it = track.find("instrumenttrack")
+    if it is not None:
+        it.set("usemasterpitch", "0")
+        it.set("basenote", "69")
+    return {
+        "track_index": track_index,
+        "src": str(path),
+        "exists": path.is_file(),
+        "message": f"Set AFP sample on track {track_index} to '{path}'",
+    }
+
+
+def configure_talking_bass_oscillator(root: ET.Element, track_index: int) -> None:
+    """Saw+sub TripleOscillator body (optional; talkingbass.lv2 synthesizes itself)."""
+    track = find_track_element(root, track_index)
+    inst = track.find("instrumenttrack/instrument")
+    if inst is None or inst.get("name") != "tripleoscillator":
+        raise ValueError(f"Track {track_index} is not a tripleoscillator track")
+    osc = inst.find("tripleoscillator")
+    if osc is None:
+        raise ValueError(f"Track {track_index} has no tripleoscillator node")
+    osc.attrib.update({
+        "wavetype0": "1", "wavetype1": "1", "wavetype2": "0",
+        "vol0": "42", "vol1": "28", "vol2": "48",
+        "coarse0": "0", "coarse1": "-12", "coarse2": "-24",
+        "pan0": "0", "pan1": "0", "pan2": "0",
+        "useWaveTable1": "1", "useWaveTable2": "1", "useWaveTable3": "1",
+    })
+    it = track.find("instrumenttrack")
+    eldata = it.find("eldata")
+    if eldata is not None:
+        eldata.set("fwet", "0")
+        eldata.set("fcut", "8000")
+        eldata.set("ftype", "0")
+        elvol = eldata.find("elvol")
+        if elvol is not None:
+            elvol.set("amt", "1")
+            elvol.set("att", "0.008")
+            elvol.set("dec", "0.28")
+            elvol.set("sustain", "0.78")
+            elvol.set("rel", "0.14")
+            elvol.set("hold", "0.02")
