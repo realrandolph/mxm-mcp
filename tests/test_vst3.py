@@ -5,6 +5,7 @@ output and a compiled stub module; serialization is pure XML. The end-to-end
 render check lives in ``test_lmms13_integration.py``.
 """
 
+import ctypes
 import json
 import os
 import platform
@@ -484,10 +485,18 @@ def _cpp_utf16(text: str) -> str:
 
 # A stub IPluginFactory3 (a superset of v1/v2) with both class-info paths and a
 # UTF-16 name. The interface ids are generated with the host's byte order, so
-# this also exercises queryInterface on Windows.
+# this also exercises queryInterface on Windows; the vtable uses __stdcall
+# there, matching the SDK's PLUGIN_API.
 _FAKE_MODULE_C = textwrap.dedent(r"""
     #include <stdint.h>
     #include <string.h>
+    #ifdef _WIN32
+    #define VST3_EXPORT __declspec(dllexport)
+    #define VST3_CALL __stdcall
+    #else
+    #define VST3_EXPORT
+    #define VST3_CALL
+    #endif
     typedef struct { uint8_t cid[16]; int32_t cardinality; char category[32];
         char name[64]; uint32_t class_flags; char sub_categories[128];
         char vendor[64]; char version[64]; char sdk_version[64]; } PClassInfo2;
@@ -495,14 +504,15 @@ _FAKE_MODULE_C = textwrap.dedent(r"""
         uint16_t name[64]; uint32_t class_flags; char sub_categories[128];
         uint16_t vendor[64]; uint16_t version[64]; uint16_t sdk_version[64]; } PClassInfoW;
     typedef struct FactoryVtbl {
-        int32_t (*queryInterface)(void*,const char*,void**);
-        uint32_t (*addRef)(void*); uint32_t (*release)(void*);
-        int32_t (*getFactoryInfo)(void*,void*); int32_t (*countClasses)(void*);
-        int32_t (*getClassInfo)(void*,int32_t,void*);
-        int32_t (*createInstance)(void*,const char*,const char*,void**);
-        int32_t (*getClassInfo2)(void*,int32_t,PClassInfo2*);
-        int32_t (*getClassInfoUnicode)(void*,int32_t,PClassInfoW*);
-        int32_t (*setHostContext)(void*,void*); } FactoryVtbl;
+        int32_t (VST3_CALL *queryInterface)(void*,const char*,void**);
+        uint32_t (VST3_CALL *addRef)(void*); uint32_t (VST3_CALL *release)(void*);
+        int32_t (VST3_CALL *getFactoryInfo)(void*,void*);
+        int32_t (VST3_CALL *countClasses)(void*);
+        int32_t (VST3_CALL *getClassInfo)(void*,int32_t,void*);
+        int32_t (VST3_CALL *createInstance)(void*,const char*,const char*,void**);
+        int32_t (VST3_CALL *getClassInfo2)(void*,int32_t,PClassInfo2*);
+        int32_t (VST3_CALL *getClassInfoUnicode)(void*,int32_t,PClassInfoW*);
+        int32_t (VST3_CALL *setHostContext)(void*,void*); } FactoryVtbl;
     typedef struct { const FactoryVtbl* vtbl; } Factory;
     static const uint8_t k_iid2[16] = {%(iid2)s};
     static const uint8_t k_iid3[16] = {%(iid3)s};
@@ -537,9 +547,14 @@ _FAKE_MODULE_C = textwrap.dedent(r"""
     static const FactoryVtbl g_vtbl={f_query,f_addref,f_release,f_info,f_count,f_get,
         f_create,f_get2,f_getu,f_sethost};
     static Factory g_factory={&g_vtbl};
-    int ModuleEntry(void* h){(void)h;return 1;}
-    int ModuleExit(void){return 1;}
-    Factory* GetPluginFactory(void){return &g_factory;}
+    VST3_EXPORT Factory* VST3_CALL GetPluginFactory(void){return &g_factory;}
+    #ifdef _WIN32
+    VST3_EXPORT int InitDll(void){return 1;}
+    VST3_EXPORT int ExitDll(void){return 1;}
+    #else
+    VST3_EXPORT int ModuleEntry(void* h){(void)h;return 1;}
+    VST3_EXPORT int ModuleExit(void){return 1;}
+    #endif
 """).strip() % {
     "iid2": _cpp_bytes(plat.iid_bytes("factory2")),
     "iid3": _cpp_bytes(plat.iid_bytes("factory3")),
@@ -566,6 +581,46 @@ def _build_fake_bundle(tmp_path):
     return tmp_path / "Fake.vst3"
 
 
+def _windows_arch_dir() -> str:
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        return "x86_64-win"
+    if machine in {"arm64", "aarch64"}:
+        return "arm64-win"
+    return "x86-win"
+
+
+def _build_fake_windows_bundle(tmp_path):
+    """Compile the stub into a Windows VST3 package (Windows only).
+
+    Loading it exercises the real Windows path: CDLL, the ``InitDll`` entry
+    point (Windows has no ``ModuleEntry``) and the ``__stdcall`` vtable.
+    """
+    if not plat.WINDOWS:
+        pytest.skip("Windows-only DLL loader test")
+    if platform.machine().lower() in {"x86", "i386", "i686"}:
+        pytest.skip("32-bit stdcall name decoration is out of scope for the stub")
+    out_dir = tmp_path / "Fake.vst3" / "Contents" / _windows_arch_dir()
+    out_dir.mkdir(parents=True)
+    binary = out_dir / "Fake.vst3"
+    source = tmp_path / "fake_module.c"
+    source.write_text(_FAKE_MODULE_C)
+    for compiler in (shutil.which("gcc"), shutil.which("clang")):
+        if compiler is None:
+            continue
+        proc = subprocess.run([compiler, "-shared", "-O0", "-o", str(binary), str(source)],
+                              capture_output=True, text=True)
+        if proc.returncode == 0 and binary.is_file():
+            return tmp_path / "Fake.vst3"
+    cl = shutil.which("cl")
+    if cl is not None:
+        proc = subprocess.run([cl, "/nologo", "/LD", str(source), f"/Fe:{binary}"],
+                              capture_output=True, text=True)
+        if proc.returncode == 0 and binary.is_file():
+            return tmp_path / "Fake.vst3"
+    pytest.skip("no compiler could build the Windows VST3 stub")
+
+
 class TestVst3ProbeCtypes:
     """Deterministic coverage for the riskiest code in vst3_probe.py."""
 
@@ -579,6 +634,20 @@ class TestVst3ProbeCtypes:
         bare = tmp_path / "Bare.vst3"
         bare.write_bytes(b"")
         assert vst3_probe.bundle_binary(bare) == bare
+
+    def test_module_loader_is_cdll(self):
+        # The exported entry points are plain C functions; WinDLL would impose
+        # stdcall on every lookup, so only vtable calls use the platform funtype.
+        assert vst3_probe._CDLL is ctypes.CDLL
+
+    @pytest.mark.skipif(not plat.WINDOWS, reason="Windows-only DLL loader test")
+    def test_windows_loader_reads_stub_dll(self, tmp_path):
+        result = vst3_probe.probe_bundle(_build_fake_windows_bundle(tmp_path))
+        assert "error" not in result, result
+        info = result["classes"][0]
+        assert info["cid"] == FAKE_CID
+        assert info["name"] == UNICODE_NAME
+        assert info["sub_categories"] == "Instrument|Synth"
 
     def test_probe_reports_missing_binary(self, tmp_path):
         (tmp_path / "Empty.vst3").mkdir()

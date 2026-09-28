@@ -27,14 +27,20 @@ from . import vst3_platform as plat
 _IID_FACTORY2 = plat.iid_bytes("factory2")
 _IID_FACTORY3 = plat.iid_bytes("factory3")
 
+#! The exported module entry points are ordinary C functions resolved from the
+#! DLL (InitDll/ExitDll are cdecl even on Windows; GetPluginFactory is declared
+#! PLUGIN_API, but that only affects __stdcall on 32-bit and it takes no
+#! arguments). So load the module with the normal CDLL loader -- WinDLL would
+#! impose stdcall on every lookup. Only the COM/vtable calls need the platform
+#! function type below, since those do take arguments.
+_CDLL = ctypes.CDLL
+_FUNCTYPE = ctypes.WINFUNCTYPE if plat.WINDOWS else ctypes.CFUNCTYPE
+
 if plat.WINDOWS:
-    _CDLL, _FUNCTYPE = ctypes.WinDLL, ctypes.WINFUNCTYPE
     try:  # plugins may use COM while initializing; MXM does the same.
         ctypes.windll.ole32.CoInitializeEx(None, 2)
     except Exception:  # pragma: no cover - best effort
         pass
-else:
-    _CDLL, _FUNCTYPE = ctypes.CDLL, ctypes.CFUNCTYPE
 
 #! FUnknown/IPluginFactory vtable slots: queryInterface=0, release=2,
 #! getFactoryInfo=3, countClasses=4, getClassInfo=5, getClassInfo2=7,
