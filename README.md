@@ -51,7 +51,7 @@ Add to your `opencode.json`:
       "type": "local",
       "command": ["python", "-m", "lmms_mcp"],
       "environment": {
-        "LMMS_PROJECTS_DIR": "/path/to/your/lmms/projects"
+        "MXM_PROJECTS_DIR": "/path/to/your/mxm/projects"
       }
     }
   }
@@ -69,7 +69,7 @@ Add to `claude_desktop_config.json`:
       "command": "python",
       "args": ["-m", "lmms_mcp"],
       "env": {
-        "LMMS_PROJECTS_DIR": "/path/to/your/lmms/projects"
+        "MXM_PROJECTS_DIR": "/path/to/your/mxm/projects"
       }
     }
   }
@@ -175,7 +175,7 @@ python -m lmms_mcp
 
 | Tool | Description |
 |------|-------------|
-| `get_lmms_info` | Detect installed MXM version + available plugins |
+| `get_mxm_info` | Detect installed MXM version + available plugins |
 | `render_project` | Export to WAV/FLAC/OGG/MP3 via headless MXM render |
 
 MXM is the only DAW binary this server detects or invokes. The server
@@ -306,10 +306,10 @@ Typical chains:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LMMS_PROJECTS_DIR` | `~/Desktop/Media/lmms/AI-Projects` | Default directory for saving projects |
+| `MXM_PROJECTS_DIR` | current working directory | Directory for saves with no explicit path |
 | `MXM_EXECUTABLE` | auto-detected | Path to the MXM binary (for version/build checks and rendering) |
 | `MXM_PLUGIN_DIR` | auto-detected | MXM plugins directory (for plugin availability checks) |
-| `LMMS_PRESETS_DIR` | auto-detected | Path to the ZynAddSubFX presets folder (`presets/ZynAddSubFX`) |
+| `MXM_PRESETS_DIR` | auto-detected | Path to the ZynAddSubFX presets folder (`presets/ZynAddSubFX`) |
 
 ## Configuration
 
@@ -324,7 +324,7 @@ Typical chains:
       "cwd": ".",
       "enabled": true,
       "environment": {
-        "LMMS_PROJECTS_DIR": "C:\\Users\\you\\Music\\LMMS\\Projects"
+        "MXM_PROJECTS_DIR": "C:\\Users\\you\\Music\\MXM\\Projects"
       }
     }
   }
@@ -340,7 +340,7 @@ Typical chains:
       "command": "python",
       "args": ["-m", "lmms_mcp"],
       "env": {
-        "LMMS_PROJECTS_DIR": "/home/you/music/lmms/projects"
+        "MXM_PROJECTS_DIR": "/home/you/music/mxm/projects"
       }
     }
   }
@@ -372,7 +372,7 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 ## Links
 
-- [LMMS](https://lmms.io/) - The DAW this server controls
+- [LMMS](https://lmms.io/) - Upstream project of MXM, the DAW this server controls
 - [MCP Protocol](https://modelcontextprotocol.io/) - Model Context Protocol specification
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) - Official Python SDK
 - [opencode](https://opencode.ai/) - AI coding assistant with MCP support

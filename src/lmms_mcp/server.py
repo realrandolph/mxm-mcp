@@ -30,10 +30,19 @@ from .models import (
 )
 from .project import LMMSProject, get_project, set_project
 
-DEFAULT_PROJECTS_DIR = os.environ.get(
-    "LMMS_PROJECTS_DIR",
-    str(Path.home() / "Desktop" / "Media" / "lmms" / "AI-Projects"),
-)
+
+def _default_projects_dir() -> Path:
+    """Directory used for saves with no explicit location.
+
+    ``MXM_PROJECTS_DIR`` is an explicit user override; otherwise relative
+    saves resolve against the process working directory.
+    """
+    configured = os.environ.get("MXM_PROJECTS_DIR")
+    return Path(configured) if configured else Path.cwd()
+
+
+# Snapshot used in the server instructions; live resolution is per call.
+DEFAULT_PROJECTS_DIR = _default_projects_dir()
 
 # Real LMMS built-in instrument plugin names (as used in the XML
 # <instrument name="..."> attribute). Verified against LMMS source.
@@ -91,16 +100,16 @@ Key concepts:
 - Notes use MIDI key numbers: 60=C4 (middle C), 69=A4
 - Volume: 0-200 (100=normal), Panning: -100 to +100
 
-IMPORTANT - Instruments: Only use built-in LMMS instrument names (see the
+IMPORTANT - Instruments: Only use built-in instrument names (see the
 add_instrument_track tool description or lmms://reference/instruments).
-LMMS has NO plugin download mechanism. If asked for a sound you cannot
+MXM has NO plugin download mechanism. If asked for a sound you cannot
 produce, use tripleoscillator (universal synth) and explain the limitation.
 Safe choices: tripleoscillator, kicker (drums), lb302 (bass),
 freeboy/nes/sid (chiptune), organic (pads/organ).
 
-Custom plugins: The user may have installed additional LMMS plugins or
+Custom plugins: The user may have installed additional MXM plugins or
  VSTs. Check list_available_plugins for dynamically detected custom
- plugins. Surge XT uses LMMS's native LV2 instrument host.
+ plugins. Surge XT uses MXM's native LV2 instrument host.
 
 Native VST3: MXM hosts VST3 instruments natively (plugin
  "vst3instrument"). Use list_vst3_instruments to discover installed
@@ -206,11 +215,11 @@ def save_project(
     proj = get_project()
 
     if not path and not proj.path:
-        projects_dir = Path(DEFAULT_PROJECTS_DIR)
+        projects_dir = _default_projects_dir()
         projects_dir.mkdir(parents=True, exist_ok=True)
         save_path = str(projects_dir / "untitled.mmpz")
     elif path and not Path(path).is_absolute():
-        projects_dir = Path(DEFAULT_PROJECTS_DIR)
+        projects_dir = _default_projects_dir()
         projects_dir.mkdir(parents=True, exist_ok=True)
         save_path = str(projects_dir / path)
     else:
@@ -337,7 +346,7 @@ def add_instrument_track(
             suggestions = ", ".join(sorted(KNOWN_INSTRUMENTS.keys()))
             return json.dumps({
                 "error": f"Unknown instrument '{instrument}'. "
-                f"LMMS has no plugin download mechanism - only built-in "
+                f"MXM has no plugin download mechanism - only built-in "
                 f"instruments can be used.",
                 "valid_instruments": sorted(KNOWN_INSTRUMENTS.keys()),
                 "hint": f"Use one of: {suggestions}. "
@@ -987,8 +996,8 @@ def list_zyn_presets(category: str | None = None) -> str:
     if base is None:
         return json.dumps({
             "error": "No ZynAddSubFX presets directory found.",
-            "hint": "Install MXM or set the LMMS_PRESETS_DIR environment "
-                    "variable to your MXM/LMMS data/presets/ZynAddSubFX folder.",
+            "hint": "Install MXM or set the MXM_PRESETS_DIR environment "
+                    "variable to your MXM data/presets/ZynAddSubFX folder.",
         })
     try:
         presets = zyn_presets.list_presets(category)
@@ -1140,7 +1149,7 @@ def set_instrument_filter(
 
 
 @mcp.tool()
-def get_lmms_info() -> str:
+def get_mxm_info() -> str:
     """Get info about the installed MXM application.
 
     Shows the detected MXM version, installation path and which
@@ -1271,9 +1280,7 @@ def list_available_plugins() -> str:
     classified = lmms_app.classify_installed_plugins(known_inst, known_eff)
     binary = lmms_app.find_mxm_binary()
     return json.dumps({
-        # Field name kept for backward compatibility; the value reports
-        # whether the installed MXM application was detected.
-        "lmms_found": binary is not None,
+        "mxm_found": binary is not None,
         "version": lmms_app.get_mxm_version(),
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
@@ -2189,9 +2196,9 @@ def resource_project_xml() -> str:
 
 @mcp.resource("lmms://reference/instruments")
 def resource_instruments() -> str:
-    """List of available LMMS instruments/plugins (built-in, verified)."""
+    """List of available built-in instrument plugins (verified)."""
     return json.dumps({
-        "note": "These are ALL built-in LMMS instruments. LMMS cannot "
+        "note": "These are ALL built-in instrument plugins. MXM cannot "
                 "download additional plugins - do not use any other names.",
         "instruments": [
             {"name": name, "description": desc}

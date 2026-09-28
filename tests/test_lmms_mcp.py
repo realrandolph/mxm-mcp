@@ -882,6 +882,77 @@ class TestMxmApp:
             lmms_app.find_vst_plugins("Z:/no/such/dir")
 
 
+class TestMxmAppConfiguration:
+    """The MCP exposes MXM-named app/config interfaces, never LMMS ones.
+
+    Format-level names (``LMMSProject``, ``lmms-project``, plugin ids,
+    ``lmms://`` resource URIs) are intentionally not listed here.
+    """
+
+    _LEGACY_APP_NAMES = (
+        "AI-Projects",
+        "LMMS_PROJECTS_DIR",
+        "LMMS_PRESETS_DIR",
+        "LMMS_EXECUTABLE",
+        "LMMS_PLUGIN_DIR",
+        "get_lmms_info",
+        "lmms_found",
+        "find_lmms_exe",
+        "find_mxm_exe",
+    )
+
+    def test_source_has_no_lmms_application_interfaces(self):
+        package = Path(__file__).resolve().parents[1] / "src" / "lmms_mcp"
+        offenders = []
+        for source in sorted(package.rglob("*.py")):
+            text = source.read_text(encoding="utf-8")
+            offenders += [
+                f"{source.name}: {name}"
+                for name in self._LEGACY_APP_NAMES if name in text
+            ]
+        assert offenders == []
+
+    def test_docs_have_no_lmms_application_interfaces(self):
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for doc in ("README.md", "pyproject.toml"):
+            text = (root / doc).read_text(encoding="utf-8")
+            offenders += [
+                f"{doc}: {name}"
+                for name in self._LEGACY_APP_NAMES if name in text
+            ]
+        assert offenders == []
+
+    def test_tool_is_named_get_mxm_info(self):
+        from lmms_mcp import server as srv
+        assert hasattr(srv, "get_mxm_info")
+        assert not hasattr(srv, "get_lmms_info")
+
+    def test_list_available_plugins_reports_mxm_found(self):
+        from lmms_mcp import server as srv
+        result = json.loads(srv.list_available_plugins())
+        assert "mxm_found" in result
+        assert "lmms_found" not in result
+
+    def test_projects_dir_env_override(self, monkeypatch, tmp_path):
+        from lmms_mcp import server as srv
+        monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
+        assert srv._default_projects_dir() == tmp_path
+        monkeypatch.delenv("MXM_PROJECTS_DIR", raising=False)
+        assert srv._default_projects_dir() == Path.cwd()
+
+    def test_relative_save_uses_configured_projects_dir(self, monkeypatch, tmp_path):
+        from lmms_mcp import server as srv
+        from lmms_mcp.project import LMMSProject
+        monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
+        proj = LMMSProject()
+        proj.new()
+        srv.set_project(proj)
+        response = json.loads(srv.save_project("song.mmpz"))
+        assert Path(response["path"]) == tmp_path / "song.mmpz"
+        assert (tmp_path / "song.mmpz").is_file()
+
+
 class TestCustomPluginsAndVst:
     """Tests for dynamic plugin usage and VST tracks."""
 
