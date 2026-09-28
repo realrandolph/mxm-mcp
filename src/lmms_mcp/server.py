@@ -1453,7 +1453,9 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
     the returned ``module`` and ``cid`` with add_vst3_instrument_track.
 
     This is MXM's native VST3 host, not the Carla bridge. Set
-    ``include_effects=True`` to also list VST3 effects.
+    ``include_effects=True`` to also list VST3 effects. Discovery is
+    implemented for Linux (MXM's VST3 host targets all its platforms, but the
+    MCP probe only understands the Linux bundle layout so far).
 
     Args:
         include_effects: Also list VST3 effects (default: instruments only)
@@ -1466,12 +1468,12 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
     instruments = [p for p in plugins if p["is_instrument"]]
     effects = [p for p in plugins if not p["is_instrument"]]
     selected = plugins if include_effects else instruments
-    supported = vst3_mod.native_vst3_supported()
+    supported = vst3_mod.native_vst3_discovery_supported()
     return json.dumps({
         "host": xml_parser.NATIVE_VST3_HOST,
         "native": True,
         "carla": False,
-        "supported": supported,
+        "discovery_supported": supported,
         "path_only": vst3_mod.path_only_enabled(),
         "host_available": lmms_app.mxm_supports_native_vst3(),
         "search_paths": vst3_mod.effective_search_paths(),
@@ -1481,8 +1483,10 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
         "note": "Pass a plugin's module and cid to add_vst3_instrument_track. "
                 "VST3 discovery is performed by loading each module's factory.",
         **({} if supported else {
-            "warning": "Native VST3 hosting is only implemented on Linux "
-                       "(MXM's VST3 host). No plugins were scanned.",
+            "warning": "This MCP can only discover native VST3 plugins on "
+                       "Linux. MXM itself builds its VST3 host for all "
+                       "supported platforms; on this platform pass an "
+                       "explicit module_path and cid with allow_unverified.",
         }),
     }, indent=2)
 
@@ -1576,6 +1580,7 @@ def add_vst3_instrument_track(
                 ]
             return json.dumps(payload)
 
+    was_modified = proj._modified
     result = proj.add_track(
         "instrument", name,
         instrument=xml_parser.NATIVE_VST3_HOST,
@@ -1590,8 +1595,10 @@ def add_vst3_instrument_track(
             track, descriptor["module"], descriptor["cid"], state=state,
         )
     except ValueError as exc:
-        # Do not leave a bare vst3instrument track behind.
+        # Do not leave a bare vst3instrument track behind, nor mark the
+        # project modified for a change that was rolled back.
         proj.remove_track(idx)
+        proj._modified = was_modified
         return json.dumps({"error": str(exc)})
     proj._modified = True
 
@@ -1606,10 +1613,11 @@ def add_vst3_instrument_track(
         "cid": descriptor["cid"],
         "verified": verified,
     })
-    if not vst3_mod.native_vst3_supported():
+    if not vst3_mod.native_vst3_discovery_supported():
         result["warning"] = (
-            "Native VST3 hosting is only implemented on Linux; MXM will not "
-            "load this plugin on this platform."
+            "This MCP can only discover native VST3 plugins on Linux. MXM "
+            "builds its VST3 host for all supported platforms, so this project "
+            "may still load there; discovery was skipped here."
         )
     elif not Path(descriptor["module"]).is_dir():
         result["warning"] = (

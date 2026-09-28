@@ -208,7 +208,13 @@ The MCP discovers VST3 plugins from the same locations MXM scans:
 directory, plus `$VST3_PATH`. Directory scans are recursive and directory
 entries are recorded with absolute paths, matching MXM. Set
 `MXM_VST3_PATH_ONLY=1` (or to any value) to restrict discovery to
-`$VST3_PATH`, exactly like MXM. Native VST3 hosting is Linux-only today.
+`$VST3_PATH`, exactly like MXM.
+
+MXM builds its native VST3 host for all platforms it supports (tested on
+Linux so far). This MCP's discovery/probe currently implements the Linux
+bundle layout only, so `list_vst3_instruments` returns nothing elsewhere;
+you can still author a track by passing an explicit `module_path` + `cid`
+with `allow_unverified=True`.
 
 ### Utilities
 

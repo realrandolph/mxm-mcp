@@ -159,28 +159,39 @@ def lmms_supports_carla() -> bool:
 
 
 @lru_cache(maxsize=1)
-def get_mxm_build_options() -> dict[str, bool]:
-    """Return boolean build options reported by the MXM binary's ``--version``.
-
-    Cached: the installed binary does not change during a session and this is
-    consulted by several tools.
-    """
+def _mxm_build_options_cached() -> tuple[tuple[str, bool], ...]:
     exe = find_mxm_exe()
     if exe is None:
-        return {}
+        return ()
     try:
         proc = subprocess.run(
             [str(exe), "--version"], capture_output=True, text=True, timeout=10,
         )
         out = proc.stdout + proc.stderr
     except (OSError, subprocess.TimeoutExpired):
-        return {}
-    return {
+        return ()
+    options = {
         name.lower(): value.upper() in {"TRUE", "ON", "1"}
         for name, value in re.findall(
             r"(?:MXM_|WANT_)([A-Z0-9_]+)=?'?([A-Z0-9]+)'?", out
         )
     }
+    return tuple(sorted(options.items()))
+
+
+def get_mxm_build_options() -> dict[str, bool]:
+    """Return boolean build options reported by the MXM binary's ``--version``.
+
+    The subprocess result is cached (the installed binary does not change
+    during a session) but a fresh dict is returned so callers cannot mutate
+    the cache.
+    """
+    return dict(_mxm_build_options_cached())
+
+
+def clear_mxm_build_options_cache() -> None:
+    """Drop the cached MXM ``--version`` result (used by tests)."""
+    _mxm_build_options_cached.cache_clear()
 
 
 def mxm_supports_native_vst3() -> bool:

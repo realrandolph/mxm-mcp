@@ -199,6 +199,27 @@ class TestVst3Discovery:
         names = {path.name for path in vst3.find_vst3_bundles()}
         assert names == {"Top.vst3", "Inner.vst3"}
 
+    def test_scan_does_not_descend_into_bundles(self, tmp_path, monkeypatch):
+        standard = tmp_path / "standard"
+        nested = standard / "Top.vst3" / "Nested.vst3"
+        nested.mkdir(parents=True)
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [standard])
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        monkeypatch.delenv("VST3_PATH", raising=False)
+
+        names = {path.name for path in vst3.find_vst3_bundles()}
+        assert names == {"Top.vst3"}
+
+    def test_vst3_path_dir_scan_skips_vst3_files(self, tmp_path, monkeypatch):
+        # MXM's discoverPathOrDirectory lists directories only (QDir::Dirs).
+        (tmp_path / "Real.vst3").mkdir()
+        (tmp_path / "Loose.vst3").write_bytes(b"not a bundle")
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.setenv("VST3_PATH", str(tmp_path))
+
+        found = vst3.find_vst3_bundles()
+        assert found == [tmp_path / "Real.vst3"]
+
     def test_relative_vst3_path_is_made_absolute(self, tmp_path, monkeypatch):
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "Inner.vst3").mkdir()
@@ -241,7 +262,7 @@ class TestVst3Discovery:
 
     def test_native_vst3_platform_guard(self, monkeypatch):
         monkeypatch.setattr(vst3.sys, "platform", "win32")
-        assert vst3.native_vst3_supported() is False
+        assert vst3.native_vst3_discovery_supported() is False
         assert vst3.discover_vst3_plugins(bundles=[Path("/x.vst3")]) == []
 
     def test_discover_filters_audio_modules_and_classifies(self):
@@ -392,16 +413,35 @@ class TestMxmBuildOptionsCache:
             lmms_app.subprocess, "run",
             lambda *a, **k: calls.append(a) or Completed(),
         )
-        lmms_app.get_mxm_build_options.cache_clear()
+        lmms_app.clear_mxm_build_options_cache()
         try:
             first = lmms_app.get_mxm_build_options()
             second = lmms_app.get_mxm_build_options()
         finally:
-            lmms_app.get_mxm_build_options.cache_clear()
+            lmms_app.clear_mxm_build_options_cache()
 
         assert first == second
         assert first["have_vst3"] is True
         assert len(calls) == 1
+
+    def test_build_options_returns_independent_dicts(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        class Completed:
+            stdout = "MXM_HAVE_VST3='TRUE'\n"
+            stderr = ""
+
+        monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: Path("/fake/mxm"))
+        monkeypatch.setattr(lmms_app.subprocess, "run", lambda *a, **k: Completed())
+        lmms_app.clear_mxm_build_options_cache()
+        try:
+            first = lmms_app.get_mxm_build_options()
+            first["have_vst3"] = False
+            second = lmms_app.get_mxm_build_options()
+        finally:
+            lmms_app.clear_mxm_build_options_cache()
+
+        assert second["have_vst3"] is True
 
 
 class TestVst3ServerTools:
@@ -520,6 +560,9 @@ class TestVst3ServerTools:
     def test_add_rolls_back_track_when_configuration_fails(self, monkeypatch):
         self._patch_discovery(monkeypatch, [_descriptor(name="Surge XT")])
         project = self._new_project()
+        # Pretend the project was just saved/cleaned so a stray modified flag
+        # would be observable.
+        project._modified = False
 
         def boom(*args, **kwargs):
             raise ValueError("serialization failed")
@@ -530,6 +573,8 @@ class TestVst3ServerTools:
         ))
         assert "error" in response
         assert find_tracks(project.root) == []
+        # A rolled-back change must not leave the project marked modified.
+        assert project.modified is False
 
     def test_add_requires_a_selection(self, monkeypatch):
         self._patch_discovery(monkeypatch, [])
@@ -632,7 +677,7 @@ _FAKE_MODULE_C = textwrap.dedent(
 def _build_fake_bundle(tmp_path: Path) -> Path:
     """Compile a minimal VST3 module so the ctypes probe can be tested."""
     if not sys.platform.startswith("linux"):
-        pytest.skip("native VST3 probing is Linux-only")
+        pytest.skip("native VST3 discovery is Linux-only in this MCP")
     compiler = shutil.which("cc") or shutil.which("gcc")
     if compiler is None:
         pytest.skip("no C compiler available to build a stub VST3 module")

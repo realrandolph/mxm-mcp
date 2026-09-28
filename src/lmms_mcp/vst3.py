@@ -39,8 +39,15 @@ _PROBE_TIMEOUT_SECONDS = 30
 _CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 
-def native_vst3_supported() -> bool:
-    """Whether this platform can host MXM's native VST3 plug-in (Linux today)."""
+def native_vst3_discovery_supported() -> bool:
+    """Whether this MCP can discover native VST3 plugins on this platform.
+
+    MXM builds its native VST3 host for all platforms it targets, but the
+    MCP's discovery/probe only understands the Linux bundle layout and
+    ``UID::toString()`` byte order today. On other platforms discovery returns
+    nothing; authors can still pass an explicit ``module_path`` + ``cid`` with
+    ``allow_unverified``.
+    """
     return sys.platform.startswith("linux")
 
 
@@ -110,10 +117,12 @@ def _append_bundle(path: Path, result: list[Path], seen: set[str]) -> None:
 
 
 def _collect_bundles(directory: Path, result: list[Path], seen: set[str]) -> None:
-    """Recursively collect ``.vst3`` bundles under *directory*.
+    """Recursively collect ``.vst3`` entries under *directory*.
 
-    Mirrors MXM's ``findFilesWithExt``: descend into ordinary directories but
-    treat a ``.vst3`` entry as a bundle and do not descend into it.
+    Mirrors MXM's ``findFilesWithExt`` (used for the standard locations):
+    descend into ordinary directories but treat a ``.vst3`` entry as a bundle
+    and do not descend into it. Named after MXM, which matches by extension
+    here, so ``.vst3`` files are included as well as bundles.
     """
     try:
         entries = sorted(directory.iterdir())
@@ -126,12 +135,33 @@ def _collect_bundles(directory: Path, result: list[Path], seen: set[str]) -> Non
             _collect_bundles(entry, result, seen)
 
 
+def _collect_bundle_dirs(directory: Path, result: list[Path], seen: set[str]) -> None:
+    """Recursively collect ``.vst3`` *directories* under *directory*.
+
+    Mirrors MXM's ``discoverPathOrDirectory`` (used for ``VST3_PATH``), which
+    lists directories only (``QDir::Dirs``) and therefore never picks up a
+    ``.vst3`` file.
+    """
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        if entry.suffix.lower() == ".vst3":
+            _append_bundle(entry, result, seen)
+        else:
+            _collect_bundle_dirs(entry, result, seen)
+
+
 def _add_bundles_from_path(path: Path, result: list[Path], seen: set[str]) -> None:
     """Append ``.vst3`` bundles found at/under *path* (mirrors MXM).
 
-    A path that is itself a ``.vst3`` bundle is used verbatim; a directory is
-    scanned with absolute paths (MXM uses ``QDir::absoluteFilePath``), which
-    keeps the recorded ``module`` string stable regardless of the process cwd.
+    A path that is itself a ``.vst3`` entry is used verbatim; a directory is
+    scanned with absolute paths (MXM uses ``QDir::absoluteFilePath``) and only
+    descends into directories, keeping the recorded ``module`` string stable
+    regardless of the process cwd.
     """
     if not path.exists():
         return
@@ -139,7 +169,7 @@ def _add_bundles_from_path(path: Path, result: list[Path], seen: set[str]) -> No
         _append_bundle(path, result, seen)
         return
     if path.is_dir():
-        _collect_bundles(Path(os.path.abspath(path)), result, seen)
+        _collect_bundle_dirs(Path(os.path.abspath(path)), result, seen)
 
 
 def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
@@ -214,7 +244,7 @@ def discover_vst3_plugins(
     ``class_flags``. Only classes whose category is ``Audio Module Class`` are
     returned, matching MXM's ``Vst3Manager``. *probe* is injectable for tests.
     """
-    if not native_vst3_supported():
+    if not native_vst3_discovery_supported():
         return []
     if bundles is None:
         bundles = find_vst3_bundles()
