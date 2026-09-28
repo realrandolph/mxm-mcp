@@ -6,12 +6,18 @@ render check lives in ``test_lmms13_integration.py``.
 """
 
 import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
 
 from lmms_mcp import vst3
+from lmms_mcp import vst3_probe
 from lmms_mcp import server as srv
 from lmms_mcp import xml_parser
 from lmms_mcp.project import LMMSProject
@@ -150,9 +156,9 @@ class TestVst3Helpers:
 class TestVst3Discovery:
     def test_find_bundles_honours_vst3_path(self, tmp_path, monkeypatch):
         monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.setenv("VST3_PATH", str(tmp_path))
         bundle = tmp_path / "Extra.vst3"
         bundle.mkdir()
-        monkeypatch.setenv("VST3_PATH", str(tmp_path))
         assert vst3.find_vst3_bundles() == [bundle]
 
     def test_path_only_ignores_standard_locations(self, tmp_path, monkeypatch):
@@ -168,6 +174,75 @@ class TestVst3Discovery:
         monkeypatch.delenv(vst3.PATH_ONLY_ENV)
         found = vst3.find_vst3_bundles()
         assert [path.name for path in found] == ["Builtin.vst3"]
+
+    def test_empty_path_only_env_means_path_only(self, monkeypatch, tmp_path):
+        """MXM tests std::getenv presence, so "" still means path-only."""
+        standard = tmp_path / "standard"
+        standard.mkdir()
+        (standard / "Builtin.vst3").mkdir()
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [standard])
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "")
+        monkeypatch.delenv("VST3_PATH", raising=False)
+
+        assert vst3.path_only_enabled() is True
+        assert vst3.find_vst3_bundles() == []
+
+    def test_standard_scan_is_recursive(self, tmp_path, monkeypatch):
+        standard = tmp_path / "standard"
+        (standard / "sub").mkdir(parents=True)
+        (standard / "Top.vst3").mkdir()
+        (standard / "sub" / "Inner.vst3").mkdir()
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [standard])
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        monkeypatch.delenv("VST3_PATH", raising=False)
+
+        names = {path.name for path in vst3.find_vst3_bundles()}
+        assert names == {"Top.vst3", "Inner.vst3"}
+
+    def test_relative_vst3_path_is_made_absolute(self, tmp_path, monkeypatch):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "Inner.vst3").mkdir()
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("VST3_PATH", "sub")
+
+        found = vst3.find_vst3_bundles()
+        assert found == [tmp_path / "sub" / "Inner.vst3"]
+        assert found[0].is_absolute()
+
+    def test_effective_search_paths_honours_path_only(self, monkeypatch, tmp_path):
+        standard = tmp_path / "standard"
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [standard])
+        monkeypatch.setenv("VST3_PATH", "/extra/one:/extra/two")
+
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        assert vst3.effective_search_paths() == [
+            str(standard), "/extra/one", "/extra/two",
+        ]
+
+        monkeypatch.setenv(vst3.PATH_ONLY_ENV, "1")
+        assert vst3.effective_search_paths() == ["/extra/one", "/extra/two"]
+
+    def test_app_vst3_dir_follows_symlink(self, tmp_path, monkeypatch):
+        # Real layout: <appdir>/vst3 next to the resolved executable.
+        real_bin = tmp_path / "real" / "bin"
+        real_bin.mkdir(parents=True)
+        (real_bin / "vst3").mkdir()
+        exe = real_bin / "mxm"
+        exe.write_bytes(b"#!/bin/true\n")
+        link_dir = tmp_path / "launcher"
+        link_dir.mkdir()
+        link = link_dir / "mxm"
+        link.symlink_to(exe)
+        monkeypatch.setattr(vst3.lmms_app, "find_mxm_exe", lambda: link)
+        monkeypatch.setattr(vst3.lmms_app, "find_lmms_exe", lambda: None)
+
+        assert vst3._app_vst3_dir() == real_bin / "vst3"
+
+    def test_native_vst3_platform_guard(self, monkeypatch):
+        monkeypatch.setattr(vst3.sys, "platform", "win32")
+        assert vst3.native_vst3_supported() is False
+        assert vst3.discover_vst3_plugins(bundles=[Path("/x.vst3")]) == []
 
     def test_discover_filters_audio_modules_and_classifies(self):
         def fake_probe(bundle):
@@ -282,6 +357,52 @@ class TestVst3Discovery:
         assert plugin["name"] == "Surge XT"
         assert candidates == []
 
+    def test_resolve_instruments_only_skips_effects(self):
+        plugins = [
+            _descriptor(name="Shared", sub_categories="Instrument|Synth"),
+            _descriptor(name="Shared", sub_categories="Fx|Reverb"),
+        ]
+        # Without the filter the exact name is ambiguous.
+        plugin, candidates = vst3.resolve_vst3_instrument(
+            plugins, plugin_name="Shared"
+        )
+        assert plugin is None
+        assert len(candidates) == 2
+
+        plugin, candidates = vst3.resolve_vst3_instrument(
+            plugins, plugin_name="Shared", instruments_only=True
+        )
+        assert plugin is not None
+        assert plugin["is_instrument"] is True
+        assert candidates == []
+
+
+class TestMxmBuildOptionsCache:
+    def test_build_options_are_cached(self, monkeypatch):
+        from lmms_mcp import lmms_app
+
+        calls = []
+
+        class Completed:
+            stdout = "MXM_HAVE_VST3='TRUE'\nWANT_VST3='ON'\n"
+            stderr = ""
+
+        monkeypatch.setattr(lmms_app, "find_mxm_exe", lambda: Path("/fake/mxm"))
+        monkeypatch.setattr(
+            lmms_app.subprocess, "run",
+            lambda *a, **k: calls.append(a) or Completed(),
+        )
+        lmms_app.get_mxm_build_options.cache_clear()
+        try:
+            first = lmms_app.get_mxm_build_options()
+            second = lmms_app.get_mxm_build_options()
+        finally:
+            lmms_app.get_mxm_build_options.cache_clear()
+
+        assert first == second
+        assert first["have_vst3"] is True
+        assert len(calls) == 1
+
 
 class TestVst3ServerTools:
     def _patch_discovery(self, monkeypatch, plugins):
@@ -376,7 +497,7 @@ class TestVst3ServerTools:
     def test_add_ambiguous_name_lists_matches(self, monkeypatch):
         self._patch_discovery(monkeypatch, [
             _descriptor(name="Surge XT"),
-            _descriptor(name="Surge XT Effects", sub_categories="Fx|Reverb"),
+            _descriptor(name="Surge XT Effects"),
         ])
         self._new_project()
         response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="surge"))
@@ -384,6 +505,31 @@ class TestVst3ServerTools:
         assert [plugin["name"] for plugin in response["matches"]] == [
             "Surge XT", "Surge XT Effects",
         ]
+
+    def test_add_by_name_ignores_effects(self, monkeypatch):
+        self._patch_discovery(monkeypatch, [
+            _descriptor(name="ZamComp", sub_categories="Fx|Dynamics"),
+        ])
+        self._new_project()
+        response = json.loads(srv.add_vst3_instrument_track(
+            "Lead", plugin="ZamComp"
+        ))
+        assert "error" in response
+        assert response["available"] == []
+
+    def test_add_rolls_back_track_when_configuration_fails(self, monkeypatch):
+        self._patch_discovery(monkeypatch, [_descriptor(name="Surge XT")])
+        project = self._new_project()
+
+        def boom(*args, **kwargs):
+            raise ValueError("serialization failed")
+
+        monkeypatch.setattr(xml_parser, "configure_native_vst3_instrument", boom)
+        response = json.loads(srv.add_vst3_instrument_track(
+            "Lead", plugin="Surge XT"
+        ))
+        assert "error" in response
+        assert find_tracks(project.root) == []
 
     def test_add_requires_a_selection(self, monkeypatch):
         self._patch_discovery(monkeypatch, [])
@@ -397,3 +543,166 @@ class TestVst3ServerTools:
             "Lead", instrument="vst3instrument"
         ))
         assert "add_vst3_instrument_track" in response["error"]
+
+
+_FAKE_MODULE_C = textwrap.dedent(
+    r"""
+    #include <stdint.h>
+    #include <string.h>
+
+    typedef int32_t tresult;
+    typedef int32_t int32;
+    typedef uint32_t uint32;
+
+    typedef struct {
+        uint8_t cid[16];
+        int32 cardinality;
+        char category[32];
+        char name[64];
+        uint32 class_flags;
+        char sub_categories[128];
+        char vendor[64];
+        char version[64];
+        char sdk_version[64];
+    } PClassInfo2;
+
+    typedef struct FactoryVtbl {
+        tresult (*queryInterface)(void*, const char*, void**);
+        uint32 (*addRef)(void*);
+        uint32 (*release)(void*);
+        tresult (*getFactoryInfo)(void*, void*);
+        int32 (*countClasses)(void*);
+        tresult (*getClassInfo)(void*, int32, void*);
+        tresult (*createInstance)(void*, const char*, const char*, void**);
+        tresult (*getClassInfo2)(void*, int32, PClassInfo2*);
+    } FactoryVtbl;
+
+    typedef struct { const FactoryVtbl* vtbl; } Factory;
+
+    static tresult f_query(void* self, const char* iid, void** obj) {
+        (void)iid; *obj = self; return 0;
+    }
+    static uint32 f_addref(void* self) { (void)self; return 1; }
+    static uint32 f_release(void* self) { (void)self; return 0; }
+    static tresult f_info(void* self, void* info) {
+        (void)self; memset(info, 0, 64 + 256 + 128 + 4);
+        strcpy((char*)info, "Fake Vendor"); return 0;
+    }
+    static int32 f_count(void* self) { (void)self; return 1; }
+    static tresult f_get(void* self, int32 i, void* info) {
+        (void)self; (void)i; (void)info; return 1;
+    }
+    static tresult f_create(void* self, const char* cid, const char* iid, void** obj) {
+        (void)self; (void)cid; (void)iid; (void)obj; return 1;
+    }
+    static tresult f_get2(void* self, int32 i, PClassInfo2* info) {
+        (void)self;
+        if (i != 0) return 1;
+        memset(info, 0, sizeof(*info));
+        info->cid[0] = 0xA1; info->cid[1] = 0xB2;
+        info->cid[2] = 0xC3; info->cid[3] = 0xD4;
+        info->cid[4] = 0xE5; info->cid[5] = 0xF6;
+        info->cid[6] = 0x07; info->cid[7] = 0x18;
+        info->cid[8] = 0x29; info->cid[9] = 0x3A;
+        info->cid[10] = 0x4B; info->cid[11] = 0x4C;
+        /* bytes 12-15 stay zero: guards against NUL truncation */
+        info->cardinality = 0x7FFFFFFF;
+        strcpy(info->category, "Audio Module Class");
+        strcpy(info->name, "Fake Synth");
+        info->class_flags = 0;
+        strcpy(info->sub_categories, "Instrument|Synth");
+        strcpy(info->vendor, "Fake Vendor");
+        strcpy(info->version, "1.2.3");
+        strcpy(info->sdk_version, "VST 3.7");
+        return 0;
+    }
+
+    static const FactoryVtbl g_vtbl = {
+        f_query, f_addref, f_release, f_info, f_count, f_get, f_create, f_get2
+    };
+    static Factory g_factory = { &g_vtbl };
+
+    int ModuleEntry(void* handle) { (void)handle; return 1; }
+    int ModuleExit(void) { return 1; }
+    Factory* GetPluginFactory(void) { return &g_factory; }
+    """
+).strip()
+
+
+def _build_fake_bundle(tmp_path: Path) -> Path:
+    """Compile a minimal VST3 module so the ctypes probe can be tested."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("native VST3 probing is Linux-only")
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no C compiler available to build a stub VST3 module")
+    bundle = tmp_path / "Fake.vst3"
+    so_dir = bundle / "Contents" / f"{os.uname().machine}-linux"
+    so_dir.mkdir(parents=True)
+    source = tmp_path / "fake_module.c"
+    source.write_text(_FAKE_MODULE_C)
+    so_path = so_dir / "Fake.so"
+    proc = subprocess.run(
+        [compiler, "-shared", "-fPIC", "-O0", "-o", str(so_path), str(source)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"could not build stub VST3 module: {proc.stderr.strip()}")
+    return bundle
+
+
+class TestVst3ProbeCtypes:
+    """Deterministic coverage for the riskiest code in vst3_probe.py."""
+
+    def test_bundle_so_path_locates_linux_binary(self, tmp_path):
+        bundle = tmp_path / "X.vst3"
+        so_dir = bundle / "Contents" / f"{os.uname().machine}-linux"
+        so_dir.mkdir(parents=True)
+        binary = so_dir / "X.so"
+        binary.write_bytes(b"")
+        assert vst3_probe.vst3_bundle_so_path(bundle) == binary
+
+    def test_bundle_so_path_missing(self, tmp_path):
+        bundle = tmp_path / "Empty.vst3"
+        bundle.mkdir()
+        assert vst3_probe.vst3_bundle_so_path(bundle) is None
+
+    def test_probe_reports_missing_binary(self, tmp_path):
+        bundle = tmp_path / "Empty.vst3"
+        bundle.mkdir()
+        result = vst3_probe.probe_bundle(bundle)
+        assert "error" in result
+
+    def test_probe_reads_stub_factory(self, tmp_path):
+        bundle = _build_fake_bundle(tmp_path)
+        result = vst3_probe.probe_bundle(bundle)
+        assert "error" not in result, result
+        classes = result["classes"]
+        assert len(classes) == 1
+        info = classes[0]
+        # Trailing zero bytes must be preserved (regression guard).
+        assert info["cid"] == "A1B2C3D4E5F60718293A4B4C00000000"
+        assert info["name"] == "Fake Synth"
+        assert info["category"] == "Audio Module Class"
+        assert info["sub_categories"] == "Instrument|Synth"
+        assert info["vendor"] == "Fake Vendor"
+        assert info["version"] == "1.2.3"
+
+    def test_stub_module_flows_through_discovery(self, tmp_path):
+        bundle = _build_fake_bundle(tmp_path)
+        plugins = vst3.discover_vst3_plugins(
+            bundles=[bundle], probe=vst3_probe.probe_bundle
+        )
+        assert len(plugins) == 1
+        assert plugins[0]["is_instrument"] is True
+        assert plugins[0]["cid"] == "A1B2C3D4E5F60718293A4B4C00000000"
+        assert plugins[0]["module"] == str(bundle)
+
+    def test_probe_main_emits_json_line(self, tmp_path, capsys):
+        bundle = _build_fake_bundle(tmp_path)
+        assert vst3_probe.main([str(bundle)]) == 0
+        lines = [
+            line for line in capsys.readouterr().out.splitlines() if line.strip()
+        ]
+        payload = json.loads(lines[-1])
+        assert payload["classes"][0]["name"] == "Fake Synth"

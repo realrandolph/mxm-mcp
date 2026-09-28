@@ -215,15 +215,14 @@ def test_lmms13_effect_controls_render_audibly(tmp_path):
 
 def _find_mxm_exe() -> Path | None:
     """Locate the MXM binary (the LMMS fork with native VST3 hosting)."""
-    candidates = [
-        os.environ.get("MXM_EXECUTABLE"),
-        str(Path.home() / ".local" / "bin" / "mxm"),
-        str(Path.home() / "lmms" / "build" / "mxm"),
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return Path(candidate)
-    return None
+    from lmms_mcp import lmms_app
+
+    found = lmms_app.find_mxm_exe()
+    if found is not None:
+        return found
+    # Development build fallback for checkouts that are not installed.
+    build = Path.home() / "lmms" / "build" / "mxm"
+    return build if build.is_file() else None
 
 
 def build_native_vst3_validation_project():

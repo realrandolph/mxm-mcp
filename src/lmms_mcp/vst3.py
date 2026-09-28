@@ -4,7 +4,8 @@ MXM (this project's LMMS fork) hosts VST3 natively through its
 ``vst3instrument`` plugin. This module finds the VST3 bundles MXM would find
 and exposes the identity MXM needs to host them:
 
-* ``module`` - absolute path of the ``.vst3`` bundle.
+* ``module`` - path of the ``.vst3`` bundle (absolute for standard and
+  ``VST3_PATH`` directory scans, matching MXM).
 * ``cid``    - 32 upper-case hex class id (``Vst3Manager::Descriptor::cid``).
 
 Both must match a descriptor discovered by MXM for the project to load, so
@@ -27,15 +28,25 @@ from pathlib import Path
 
 from . import lmms_app
 
-#! Discovery must match MXM's Vst3Manager::discover(). When this environment
-#! variable is set, MXM ignores the standard locations below and uses only
-#! VST3_PATH; the same restriction is honoured here.
+#! Discovery must match MXM's Vst3Manager::discover(). MXM checks the
+#! *presence* of this variable (std::getenv), so an empty value still enables
+#! path-only mode; test for presence, not truthiness.
 PATH_ONLY_ENV = "MXM_VST3_PATH_ONLY"
 
 #! Timeout for probing a single bundle in its own subprocess.
 _PROBE_TIMEOUT_SECONDS = 30
 
 _CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+
+
+def native_vst3_supported() -> bool:
+    """Whether this platform can host MXM's native VST3 plug-in (Linux today)."""
+    return sys.platform.startswith("linux")
+
+
+def path_only_enabled() -> bool:
+    """True when only ``VST3_PATH`` should be scanned (matches ``std::getenv``)."""
+    return PATH_ONLY_ENV in os.environ
 
 
 def is_valid_cid(cid: str) -> bool:
@@ -49,11 +60,15 @@ def normalize_cid(cid: str) -> str:
 
 
 def _app_vst3_dir() -> Path | None:
-    """The application-level ``vst3`` directory MXM also scans."""
+    """The application-level ``vst3`` directory MXM also scans.
+
+    MXM derives this from the resolved executable (``/proc/<pid>/exe``), so
+    follow symlinks rather than using the literal launcher path.
+    """
     exe = lmms_app.find_mxm_exe() or lmms_app.find_lmms_exe()
     if exe is None:
         return None
-    candidate = exe.parent / "vst3"
+    candidate = Path(os.path.realpath(exe)).parent / "vst3"
     return candidate if candidate.is_dir() else None
 
 
@@ -72,44 +87,76 @@ def standard_vst3_dirs() -> list[Path]:
     return directories
 
 
+def effective_search_paths() -> list[str]:
+    """The directories actually scanned, for reporting.
+
+    Honours ``MXM_VST3_PATH_ONLY`` (standard locations omitted) and appends the
+    ``VST3_PATH`` entries, so the reported paths describe the real scan.
+    """
+    paths: list[str] = []
+    if not path_only_enabled():
+        paths.extend(str(directory) for directory in standard_vst3_dirs())
+    env_path = os.environ.get("VST3_PATH", "")
+    if env_path:
+        paths.extend(part for part in env_path.split(os.pathsep) if part)
+    return paths
+
+
+def _append_bundle(path: Path, result: list[Path], seen: set[str]) -> None:
+    key = str(path)
+    if key not in seen:
+        seen.add(key)
+        result.append(path)
+
+
+def _collect_bundles(directory: Path, result: list[Path], seen: set[str]) -> None:
+    """Recursively collect ``.vst3`` bundles under *directory*.
+
+    Mirrors MXM's ``findFilesWithExt``: descend into ordinary directories but
+    treat a ``.vst3`` entry as a bundle and do not descend into it.
+    """
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.suffix.lower() == ".vst3":
+            _append_bundle(entry, result, seen)
+        elif entry.is_dir():
+            _collect_bundles(entry, result, seen)
+
+
 def _add_bundles_from_path(path: Path, result: list[Path], seen: set[str]) -> None:
-    """Append ``.vst3`` bundles found at/under *path* (mirrors MXM)."""
+    """Append ``.vst3`` bundles found at/under *path* (mirrors MXM).
+
+    A path that is itself a ``.vst3`` bundle is used verbatim; a directory is
+    scanned with absolute paths (MXM uses ``QDir::absoluteFilePath``), which
+    keeps the recorded ``module`` string stable regardless of the process cwd.
+    """
     if not path.exists():
         return
-    if path.is_dir() and path.suffix.lower() == ".vst3":
-        candidates = [path]
-    elif path.is_dir():
-        candidates = sorted(p for p in path.rglob("*.vst3") if p.is_dir())
-    elif path.is_file() and path.suffix.lower() == ".vst3":
-        candidates = [path]
-    else:
+    if path.suffix.lower() == ".vst3":
+        _append_bundle(path, result, seen)
         return
-    for candidate in candidates:
-        key = str(candidate)
-        if key not in seen:
-            seen.add(key)
-            result.append(candidate)
+    if path.is_dir():
+        _collect_bundles(Path(os.path.abspath(path)), result, seen)
 
 
 def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
     """Return the ``.vst3`` bundles MXM's native host can discover.
 
-    Honours ``MXM_VST3_PATH_ONLY`` and ``VST3_PATH`` exactly like MXM, and
-    accepts *extra_paths* (bundle files or directories) for callers that want
-    to scan a specific location.
+    Honours ``MXM_VST3_PATH_ONLY`` and ``VST3_PATH`` exactly like MXM
+    (recursive, absolute for directory scans), and accepts *extra_paths*
+    (bundle files or directories) for callers that want to scan a specific
+    location.
     """
     bundles: list[Path] = []
     seen: set[str] = set()
 
-    if not os.environ.get(PATH_ONLY_ENV):
+    if not path_only_enabled():
         for directory in standard_vst3_dirs():
             if directory.is_dir():
-                for entry in sorted(directory.iterdir()):
-                    if entry.suffix.lower() == ".vst3" and entry.is_dir():
-                        key = str(entry)
-                        if key not in seen:
-                            seen.add(key)
-                            bundles.append(entry)
+                _collect_bundles(directory, bundles, seen)
 
     raw_paths = []
     env_path = os.environ.get("VST3_PATH", "")
@@ -167,6 +214,8 @@ def discover_vst3_plugins(
     ``class_flags``. Only classes whose category is ``Audio Module Class`` are
     returned, matching MXM's ``Vst3Manager``. *probe* is injectable for tests.
     """
+    if not native_vst3_supported():
+        return []
     if bundles is None:
         bundles = find_vst3_bundles()
 
@@ -227,9 +276,12 @@ def resolve_vst3_instrument(
     plugin_name: str = "",
     module: str = "",
     cid: str = "",
+    instruments_only: bool = False,
 ) -> tuple[dict | None, list[dict]]:
     """Resolve a user request to a single discovered plugin descriptor.
 
+    When *instruments_only* is set, effect classes are ignored during name
+    matching (the explicit ``module`` + ``cid`` path is unaffected).
     Returns ``(descriptor, candidates)``. On success *descriptor* is the
     chosen plugin and *candidates* is empty. On failure *descriptor* is None
     and *candidates* lists the closest matches (for a helpful error).
@@ -239,9 +291,14 @@ def resolve_vst3_instrument(
     if not plugin_name.strip():
         return None, []
 
+    pool = (
+        [plugin for plugin in plugins if plugin.get("is_instrument")]
+        if instruments_only
+        else plugins
+    )
     query = plugin_name.strip().lower()
     exact = [
-        plugin for plugin in plugins
+        plugin for plugin in pool
         if plugin["name"].lower() == query
     ]
     if len(exact) == 1:
@@ -249,7 +306,7 @@ def resolve_vst3_instrument(
     if len(exact) > 1:
         return None, exact
 
-    matches = [plugin for plugin in plugins if query in plugin["name"].lower()]
+    matches = [plugin for plugin in pool if query in plugin["name"].lower()]
     if len(matches) == 1:
         return matches[0], []
     return None, matches

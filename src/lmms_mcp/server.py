@@ -1466,17 +1466,24 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
     instruments = [p for p in plugins if p["is_instrument"]]
     effects = [p for p in plugins if not p["is_instrument"]]
     selected = plugins if include_effects else instruments
+    supported = vst3_mod.native_vst3_supported()
     return json.dumps({
         "host": xml_parser.NATIVE_VST3_HOST,
         "native": True,
         "carla": False,
+        "supported": supported,
+        "path_only": vst3_mod.path_only_enabled(),
         "host_available": lmms_app.mxm_supports_native_vst3(),
-        "search_paths": [str(path) for path in vst3_mod.standard_vst3_dirs()],
+        "search_paths": vst3_mod.effective_search_paths(),
         "instrument_count": len(instruments),
         "effect_count": len(effects),
         "plugins": [_vst3_descriptor(plugin) for plugin in selected],
         "note": "Pass a plugin's module and cid to add_vst3_instrument_track. "
                 "VST3 discovery is performed by loading each module's factory.",
+        **({} if supported else {
+            "warning": "Native VST3 hosting is only implemented on Linux "
+                       "(MXM's VST3 host). No plugins were scanned.",
+        }),
     }, indent=2)
 
 
@@ -1546,7 +1553,7 @@ def add_vst3_instrument_track(
             descriptor = {
                 "name": Path(module_path).stem,
                 "vendor": "",
-                "module": module_path.strip(),
+                "module": os.path.abspath(module_path.strip()),
                 "cid": vst3_mod.normalize_cid(cid),
                 "is_instrument": True,
                 "sub_categories": "",
@@ -1554,7 +1561,7 @@ def add_vst3_instrument_track(
             }
     else:
         descriptor, candidates = vst3_mod.resolve_vst3_instrument(
-            discovered, plugin_name=plugin
+            discovered, plugin_name=plugin, instruments_only=True
         )
         if descriptor is None:
             payload: dict = {
@@ -1583,6 +1590,8 @@ def add_vst3_instrument_track(
             track, descriptor["module"], descriptor["cid"], state=state,
         )
     except ValueError as exc:
+        # Do not leave a bare vst3instrument track behind.
+        proj.remove_track(idx)
         return json.dumps({"error": str(exc)})
     proj._modified = True
 
@@ -1597,7 +1606,12 @@ def add_vst3_instrument_track(
         "cid": descriptor["cid"],
         "verified": verified,
     })
-    if not Path(descriptor["module"]).is_dir():
+    if not vst3_mod.native_vst3_supported():
+        result["warning"] = (
+            "Native VST3 hosting is only implemented on Linux; MXM will not "
+            "load this plugin on this platform."
+        )
+    elif not Path(descriptor["module"]).is_dir():
         result["warning"] = (
             f"VST3 module not found on disk: {descriptor['module']}"
         )

@@ -107,12 +107,15 @@ def vst3_bundle_so_path(bundle: str | Path) -> Path | None:
         return None
     stem = path.name[:-5] if path.name.lower().endswith(".vst3") else path.name
     so_name = f"{stem}.so"
-    machine = os.uname().machine
-    candidates = [
-        path / "Contents" / f"{machine}-linux" / so_name,
+    uname = getattr(os, "uname", None)
+    machine = uname().machine if uname is not None else ""
+    candidates = []
+    if machine:
+        candidates.append(path / "Contents" / f"{machine}-linux" / so_name)
+    candidates.extend([
         path / "Contents" / "x86_64-linux" / so_name,
         path / "Contents" / "aarch64-linux" / so_name,
-    ]
+    ])
     for candidate in candidates:
         if candidate.is_file():
             return candidate

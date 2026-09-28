@@ -205,8 +205,10 @@ Carla bridge - VST3 is never routed through Carla.
 The MCP discovers VST3 plugins from the same locations MXM scans:
 `$HOME/.vst3`, `/usr/lib64/vst3`, `/usr/lib/vst3`,
 `/usr/local/lib64/vst3`, `/usr/local/lib/vst3`, MXM's application `vst3`
-directory, plus `$VST3_PATH`. Set `MXM_VST3_PATH_ONLY=1` to restrict
-discovery to `$VST3_PATH`, exactly like MXM.
+directory, plus `$VST3_PATH`. Directory scans are recursive and directory
+entries are recorded with absolute paths, matching MXM. Set
+`MXM_VST3_PATH_ONLY=1` (or to any value) to restrict discovery to
+`$VST3_PATH`, exactly like MXM. Native VST3 hosting is Linux-only today.
 
 ### Utilities
 

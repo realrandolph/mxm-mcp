@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 _CANDIDATE_EXES = [
@@ -157,8 +158,13 @@ def lmms_supports_carla() -> bool:
     return options.get("carla", False) or options.get("weakcarla", False)
 
 
+@lru_cache(maxsize=1)
 def get_mxm_build_options() -> dict[str, bool]:
-    """Return boolean build options reported by the MXM binary's ``--version``."""
+    """Return boolean build options reported by the MXM binary's ``--version``.
+
+    Cached: the installed binary does not change during a session and this is
+    consulted by several tools.
+    """
     exe = find_mxm_exe()
     if exe is None:
         return {}
