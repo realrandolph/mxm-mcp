@@ -144,6 +144,7 @@ def parse_vstpreset(path: str | Path) -> dict:
             if count > _MAX_CHUNKS or chunk_offset + 4 + count * 20 > size:
                 return {**info, "error": "invalid VST3 preset chunk table", "cid": cid}
             chunks: dict[str, tuple[int, int]] = {}
+            invalid_chunks: set[str] = set()
             for _ in range(count):
                 record = stream.read(20)
                 chunk_id = record[:4].decode("ascii", "replace")
@@ -151,10 +152,16 @@ def parse_vstpreset(path: str | Path) -> dict:
                 length = int.from_bytes(record[12:20], "big")
                 if offset < 48 or offset > size or length > size - offset \
                         or offset + length > chunk_offset:
+                    invalid_chunks.add(chunk_id)
                     continue
                 chunks[chunk_id] = (offset, length)
 
             component = chunks.get("Comp")
+            controller = chunks.get("Cont")
+            unsupported_state_chunks = sorted({
+                chunk_id for chunk_id, (_, length) in chunks.items()
+                if chunk_id not in {"Comp", "Meta"} and length
+            } | {chunk_id for chunk_id in invalid_chunks if chunk_id != "Meta"})
             metadata: dict[str, str] = {}
             meta = chunks.get("Meta")
             if meta and meta[1] <= _MAX_METADATA_BYTES:
@@ -193,10 +200,14 @@ def parse_vstpreset(path: str | Path) -> dict:
         "cid": cid,
         "metadata": metadata,
         "category": category or (preset_path.parent.name or None),
+        "state_chunks": sorted(chunk_id for chunk_id, (_, length) in chunks.items()
+                                if chunk_id != "Meta" and length),
+        "requires_controller_state": bool(controller and controller[1]),
+        "unsupported_state_chunks": unsupported_state_chunks,
     }
     if state:
         result["state"] = base64.b64encode(state).decode("ascii")
-        result["loadable"] = True
+        result["loadable"] = not unsupported_state_chunks
     return result
 
 
@@ -233,6 +244,9 @@ def _associate_preset(preset: dict, plugins: list[dict], path: Path) -> dict:
         "plugin_module": plugin.get("module") if plugin else None,
         "plugin_cid": plugin.get("cid") if plugin else cid or None,
         "loadable": bool(preset.get("loadable") and plugin and plugin.get("is_instrument")),
+        "state_chunks": preset.get("state_chunks", []),
+        "requires_controller_state": preset.get("requires_controller_state", False),
+        "unsupported_state_chunks": preset.get("unsupported_state_chunks", []),
         "metadata": metadata,
         **({"state": preset["state"]} if preset.get("state") else {}),
     }

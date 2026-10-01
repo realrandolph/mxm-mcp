@@ -25,7 +25,13 @@ def clear_cache():
     discovery_cache.clear_discovery_cache()
 
 
-def _write_vstpreset(path: Path, *, cid: str = CID, state: bytes = b"opaque component state"):
+def _write_vstpreset(
+    path: Path,
+    *,
+    cid: str = CID,
+    state: bytes = b"opaque component state",
+    controller_state: bytes = b"",
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata = (b'<MetaInfo><Attribute name="Name" value="Warm Pad" />'
                 b'<Attribute name="Author" value="Ada Example" />'
@@ -33,14 +39,17 @@ def _write_vstpreset(path: Path, *, cid: str = CID, state: bytes = b"opaque comp
                 b'<Attribute name="Tags" value="soft, wide" />'
                 b'<Attribute name="Character" value="soft, wide" /></MetaInfo>')
     payload_offset = 48
-    meta_offset = payload_offset + len(state)
+    controller_offset = payload_offset + len(state)
+    meta_offset = controller_offset + len(controller_state)
     chunk_table_offset = meta_offset + len(metadata)
-    table = struct.pack(">I", 2)
+    table = struct.pack(">I", 2 + bool(controller_state))
     table += b"Comp" + struct.pack(">QQ", payload_offset, len(state))
+    if controller_state:
+        table += b"Cont" + struct.pack(">QQ", controller_offset, len(controller_state))
     table += b"Meta" + struct.pack(">QQ", meta_offset, len(metadata))
     header = (b"VST3" + struct.pack(">I", 1) + cid.encode("ascii")
               + struct.pack(">Q", chunk_table_offset))
-    path.write_bytes(header + state + metadata + table)
+    path.write_bytes(header + state + controller_state + metadata + table)
     return state
 
 
@@ -158,10 +167,22 @@ def test_vst3_preset_container_metadata_association_and_embedded_component_state
     assert preset["plugin_name"] == "Fixture Synth"
     assert preset["plugin_cid"] == CID
     assert preset["origin"] == "factory"
+    assert preset["state_chunks"] == ["Comp"]
+    assert preset["loadable"] is True
     assert preset["category"] == "Pads"
     assert preset["tags"] == ["soft", "wide"]
     assert preset["character"] == "soft, wide"
     assert preset["loadable"] is True
+
+
+def test_vst3_controller_state_chunk_is_reported_and_not_marked_loadable(tmp_path):
+    preset_path = tmp_path / "Warm Pad.vstpreset"
+    _write_vstpreset(preset_path, controller_state=b"opaque controller state")
+    parsed = vst3_presets.parse_vstpreset(preset_path)
+    assert parsed["state_chunks"] == ["Comp", "Cont"]
+    assert parsed["requires_controller_state"] is True
+    assert parsed["unsupported_state_chunks"] == ["Cont"]
+    assert parsed["loadable"] is False
 
 
 def test_vst3_user_factory_preset_banks_and_h2p_are_indexed_without_fake_metadata(
@@ -245,6 +266,25 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     project.save(project_path, compressed=False)
     reopened = xml_parser.load_project(project_path)
     assert base64.b64decode(reopened.find(".//vst3instrument/state").text) == state
+
+
+def test_vst3_controller_state_preset_fails_without_mutating_project(tmp_path, monkeypatch):
+    plugin_bundle = tmp_path / "Fixture Synth.vst3"
+    plugin_bundle.mkdir()
+    preset_path = tmp_path / "Warm Pad.vstpreset"
+    _write_vstpreset(preset_path, controller_state=b"controller state")
+    plugin = _vst3_plugin(plugin_bundle)
+    monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [tmp_path])
+    project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
+    xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
+    project._modified = False
+    before = xml_parser.ET.tostring(project.root)
+    server.set_project(project)
+    result = json.loads(server.load_native_plugin_preset(0, str(preset_path)))
+    assert "controller state" in result["error"]
+    assert xml_parser.ET.tostring(project.root) == before
+    assert project.modified is False
 
 
 def test_lv2_preset_tool_serializes_native_port_values_and_roundtrips(tmp_path, monkeypatch):

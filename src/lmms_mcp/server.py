@@ -1679,6 +1679,10 @@ def load_native_plugin_preset(track_index: int, preset: str) -> str:
             if selected is None or not vst3_presets.preset_matches_plugin(
                     selected, module=module, cid=cid):
                 raise ValueError("Preset is not indexed for this VST3 plugin")
+            if selected.get("requires_controller_state"):
+                raise ValueError(
+                    "This VST3 preset contains separate controller state that the current MMP serializer cannot embed"
+                )
             if not selected.get("loadable") or not selected.get("state"):
                 raise ValueError("This preset format has no supported embedded VST3 component state")
             xml_parser.configure_native_vst3_instrument(

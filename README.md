@@ -230,7 +230,9 @@ otherwise reuse filesystem-identity-checked cached results.
 `load_native_plugin_preset` embeds VST3 component chunks or LV2 input-control
 port values into the MMP project. Preset formats without a known compatible
 project-state representation are listed but marked non-loadable; opaque state
-is not reverse-engineered or left dependent on the original preset file.
+is not reverse-engineered or left dependent on the original preset file. VST3
+presets with separate controller/unknown state chunks are marked non-loadable
+until the MMP host representation can preserve those chunks too.
 
 ### Utilities
 
