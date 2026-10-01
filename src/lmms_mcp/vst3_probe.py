@@ -24,6 +24,8 @@ from pathlib import Path
 
 from . import vst3_platform as plat
 
+_MAX_CLASSES = 4_096
+
 _IID_FACTORY2 = plat.iid_bytes("factory2")
 _IID_FACTORY3 = plat.iid_bytes("factory3")
 
@@ -128,6 +130,8 @@ def describe_factory(factory) -> list[dict]:
     to ``IPluginFactory2`` then v1, like the SDK's ``ClassInfo``.
     """
     count = _bind(factory, 4, ctypes.c_int32, (ctypes.c_void_p,))(_address(factory))
+    if count < 0 or count > _MAX_CLASSES:
+        raise ValueError(f"plugin factory class count {count} exceeds the {_MAX_CLASSES} limit")
     factory3 = _query_interface(factory, _IID_FACTORY3)
     factory2 = _query_interface(factory, _IID_FACTORY2)
     get3 = (_bind(factory3, 8, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p))
@@ -261,7 +265,18 @@ def _factory_vendor(factory) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    for bundle in (argv if argv is not None else sys.argv[1:]):
+    arguments = list(argv if argv is not None else sys.argv[1:])
+    if len(arguments) >= 4 and arguments[0] == "--sandbox":
+        scratch, allowed_root, *arguments = arguments[1:]
+        try:
+            from .vst3_sandbox import enter_linux_sandbox
+
+            enter_linux_sandbox(arguments[0], scratch, allowed_root)
+        except Exception as exc:
+            sys.stdout.write(json.dumps({"module": arguments[0],
+                                         "error": f"sandbox setup failed: {exc}"}) + "\n")
+            return 0
+    for bundle in arguments:
         result = probe_bundle(bundle)
         sys.stdout.write(json.dumps(result) + "\n")
         sys.stdout.flush()

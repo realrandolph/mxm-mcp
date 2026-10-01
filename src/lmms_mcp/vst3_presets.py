@@ -11,13 +11,18 @@ from pathlib import Path
 
 from . import discovery_cache
 from . import vst3
+from .path_safety import resolved_path_within
 
 _VST3_EXTENSIONS = {".vstpreset"}
 _UHE_EXTENSIONS = {".h2p", ".uhe-preset"}
 _CLASS_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _MAX_CHUNKS = 256
 _MAX_METADATA_BYTES = 1024 * 1024
-_MAX_COMPONENT_BYTES = 256 * 1024 * 1024
+_MAX_COMPONENT_BYTES = 32 * 1024 * 1024
+_MAX_PRESET_FILES = 4_096
+_MAX_PRESET_TOTAL_BYTES = 128 * 1024 * 1024
+_MAX_PRESET_SCAN_ENTRIES = 100_000
+_MAX_PRESET_ROOTS = 4_096
 
 
 def _path_entries(name: str) -> list[Path]:
@@ -72,6 +77,8 @@ def preset_search_paths(plugins: list[dict] | None = None) -> list[Path]:
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths:
+        if len(unique) >= _MAX_PRESET_ROOTS:
+            break
         normalized = str(Path(path).expanduser().absolute())
         if normalized not in seen:
             seen.add(normalized)
@@ -82,31 +89,68 @@ def preset_search_paths(plugins: list[dict] | None = None) -> list[Path]:
 def _collect_files(roots: list[Path]) -> list[Path]:
     found: dict[str, Path] = {}
     visited: set[str] = set()
+    scanned = 0
+    total_bytes = 0
 
-    def walk(directory: Path) -> None:
+    def add_file(path: Path) -> None:
+        nonlocal total_bytes
+        if len(found) >= _MAX_PRESET_FILES:
+            return
+        key = str(path)
+        if key in found:
+            return
         try:
-            real = str(directory.resolve())
+            size = path.stat().st_size
+        except (OSError, RuntimeError):
+            return
+        if total_bytes + size > _MAX_PRESET_TOTAL_BYTES:
+            return
+        total_bytes += size
+        found[key] = path
+
+    def walk(directory: Path, allowed_root: Path) -> None:
+        nonlocal scanned
+        try:
+            resolved_dir = resolved_path_within(directory, allowed_root)
+            if resolved_dir is None:
+                return
+            real = str(resolved_dir)
             if real in visited:
                 return
             visited.add(real)
-            entries = sorted(directory.iterdir(), key=lambda path: path.name.lower())
-        except OSError:
+            entries = sorted(resolved_dir.iterdir(), key=lambda path: path.name.lower())
+        except (OSError, RuntimeError):
             return
         for entry in entries:
+            scanned += 1
+            if scanned > _MAX_PRESET_SCAN_ENTRIES or len(found) >= _MAX_PRESET_FILES:
+                return
             try:
-                if entry.is_file() and entry.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
-                    found[str(entry.resolve())] = entry
-                elif entry.is_dir() and (
+                if entry.is_symlink():
+                    resolved = resolved_path_within(entry, allowed_root)
+                    if resolved is None:
+                        continue
+                else:
+                    resolved = entry
+                if resolved.is_file() and entry.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
+                    add_file(resolved)
+                elif resolved.is_dir() and (
                         not entry.is_symlink() or entry.suffix.lower() == ".vst3"):
-                    walk(entry)
-            except OSError:
+                    walk(resolved, allowed_root)
+            except (OSError, RuntimeError):
                 continue
 
-    for root in roots:
-        if root.is_dir():
-            walk(root)
-        elif root.is_file() and root.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
-            found[str(root.resolve())] = root
+    for root in roots[:_MAX_PRESET_ROOTS]:
+        try:
+            resolved_root = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved_root.is_dir():
+            walk(resolved_root, resolved_root)
+        elif resolved_root.is_file() and root.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
+            add_file(resolved_root)
+        if scanned > _MAX_PRESET_SCAN_ENTRIES or len(found) >= _MAX_PRESET_FILES:
+            break
     return sorted(found.values(), key=lambda path: str(path).casefold())
 
 
@@ -122,8 +166,8 @@ def _origin(path: Path) -> str:
     return "unknown"
 
 
-def parse_vstpreset(path: str | Path) -> dict:
-    """Read the VST3 preset header, chunk table, component state and Meta XML."""
+def parse_vstpreset(path: str | Path, *, include_state: bool = False) -> dict:
+    """Read preset metadata; component state is loaded only on explicit request."""
     preset_path = Path(path)
     info: dict = {"format": "vstpreset", "loadable": False}
     try:
@@ -180,7 +224,7 @@ def parse_vstpreset(path: str | Path) -> dict:
                     pass
 
             state = None
-            if component and component[1] <= _MAX_COMPONENT_BYTES:
+            if include_state and component and component[1] <= _MAX_COMPONENT_BYTES:
                 # The component chunk is the opaque state expected by the host;
                 # the .vstpreset container itself is not copied into the MMP.
                 stream.seek(component[0])
@@ -204,10 +248,11 @@ def parse_vstpreset(path: str | Path) -> dict:
                                 if chunk_id != "Meta" and length),
         "requires_controller_state": bool(controller and controller[1]),
         "unsupported_state_chunks": unsupported_state_chunks,
+        "loadable": bool(component and component[1] <= _MAX_COMPONENT_BYTES
+                          and not unsupported_state_chunks),
     }
     if state:
         result["state"] = base64.b64encode(state).decode("ascii")
-        result["loadable"] = not unsupported_state_chunks
     return result
 
 
@@ -281,6 +326,26 @@ def discover_vst3_presets(
     return discovery_cache.cached_discovery(
         "vst3.presets", paths, build, refresh=refresh,
     )
+
+
+def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str | None:
+    """Read at most one selected component chunk, after rechecking its root and CID."""
+    source = preset.get("source")
+    if not source or not preset.get("loadable") or preset.get("requires_controller_state"):
+        return None
+    safe_path = next((resolved for root in search_paths
+                      if (resolved := resolved_path_within(source, root)) is not None), None)
+    if safe_path is None or safe_path.suffix.lower() != ".vstpreset":
+        return None
+    # This is deliberately the only path that asks the parser to retain state:
+    # one selected file, capped at _MAX_COMPONENT_BYTES (32 MiB).
+    parsed = parse_vstpreset(safe_path, include_state=True)
+    if (not parsed.get("loadable")
+            or parsed.get("cid", "").upper() != str(preset.get("plugin_cid", "")).upper()
+            or parsed.get("requires_controller_state")
+            or parsed.get("unsupported_state_chunks")):
+        return None
+    return parsed.get("state")
 
 
 def preset_matches_plugin(preset: dict, *, module: str = "", cid: str = "") -> bool:

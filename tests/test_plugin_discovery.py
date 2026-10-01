@@ -155,11 +155,14 @@ def test_vst3_preset_container_metadata_association_and_embedded_component_state
     component_state = _write_vstpreset(preset_path)
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
                         lambda plugins=None: [preset_path.parent])
-    parsed = vst3_presets.parse_vstpreset(preset_path)
+    parsed = vst3_presets.parse_vstpreset(preset_path, include_state=True)
     assert parsed["cid"] == CID
     assert parsed["name"] == "Warm Pad"
     assert parsed["metadata"]["author"] == "Ada Example"
     assert base64.b64decode(parsed["state"]) == component_state
+    listed = vst3_presets.parse_vstpreset(preset_path)
+    assert listed["loadable"] is True
+    assert "state" not in listed
 
     index = vst3_presets.discover_vst3_presets(
         [_vst3_plugin(plugin_bundle)], refresh=True)
@@ -173,6 +176,7 @@ def test_vst3_preset_container_metadata_association_and_embedded_component_state
     assert preset["tags"] == ["soft", "wide"]
     assert preset["character"] == "soft, wide"
     assert preset["loadable"] is True
+    assert "state" not in preset
 
 
 def test_vst3_controller_state_chunk_is_reported_and_not_marked_loadable(tmp_path):
@@ -237,6 +241,72 @@ def test_lv2_path_and_cache_invalidation_on_preset_edit(tmp_path, monkeypatch):
     after = lv2.discover_lv2()
     assert after is not before
     assert after["presets"][0]["port_values"] == {"gain": 0.25}
+
+
+def test_lv2_bundle_symlinks_stay_inside_configured_root(tmp_path, monkeypatch):
+    root = tmp_path / "lv2-root"
+    root.mkdir()
+    inside, _ = _fixture_lv2_bundle(root)
+    outside, _ = _fixture_lv2_bundle(tmp_path / "outside")
+    (root / "inside-alias.lv2").symlink_to(inside, target_is_directory=True)
+    (root / "outside-alias.lv2").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
+    monkeypatch.delenv("LV2_PATH", raising=False)
+
+    bundles = lv2._find_bundles([root])
+    assert [bundle for bundle, _ in bundles] == [inside]
+    assert len(lv2.discover_lv2(refresh=True)["plugins"]) == 1
+
+
+def test_lv2_rdf_file_and_triple_limits_are_enforced(tmp_path, monkeypatch):
+    root = tmp_path / "lv2"
+    bundle, _ = _fixture_lv2_bundle(root)
+    extra = bundle / "extra.ttl"
+    extra.write_text("@prefix ex: <https://example.test/> .\n" +
+                     "\n".join(f"ex:s{i} ex:p ex:o ." for i in range(30)))
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
+    monkeypatch.delenv("LV2_PATH", raising=False)
+    monkeypatch.setattr(lv2, "_MAX_RDF_FILE_TRIPLES", 15)
+    monkeypatch.setattr(lv2, "_MAX_RDF_FILE_BYTES", 1_000_000)
+    index = lv2.discover_lv2(refresh=True)
+    assert len(index["plugins"]) == 1
+    assert len(index["presets"]) == 1
+    graph, _ = lv2._load_bundle(bundle, root, lv2._RdfBudget())
+    assert not any(str(subject).endswith("s0") for subject in graph.subjects())
+
+    oversized = bundle / "oversized.ttl"
+    oversized.write_bytes(b" " * 1_000_001)
+    monkeypatch.setattr(lv2, "_MAX_RDF_FILE_BYTES", 1_000_000)
+    budget = lv2._RdfBudget()
+    assert lv2._load_bundle(bundle, root, budget)[0]
+    assert budget.bytes < oversized.stat().st_size
+
+    monkeypatch.setattr(lv2, "_MAX_RDF_FILES", 1)
+    budget = lv2._RdfBudget()
+    lv2._load_bundle(bundle, root, budget)
+    assert budget.files == 1
+
+    monkeypatch.setattr(lv2, "_MAX_RDF_FILES", 20)
+    monkeypatch.setattr(lv2, "_MAX_RDF_TOTAL_TRIPLES", 5)
+    budget = lv2._RdfBudget()
+    graph, _ = lv2._load_bundle(bundle, root, budget)
+    assert len(graph) <= 5 and budget.triples <= 5
+
+
+def test_discovery_cache_does_not_fingerprint_symlink_targets_outside_root(tmp_path):
+    root = tmp_path / "configured"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = outside / "target.lv2"
+    target.mkdir()
+    payload = target / "plugin.ttl"
+    payload.write_text("first")
+    (root / "external.lv2").symlink_to(target, target_is_directory=True)
+    before = discovery_cache.filesystem_fingerprint([root])
+    payload.write_text("second")
+    os.utime(payload, ns=(payload.stat().st_atime_ns, payload.stat().st_mtime_ns + 1_000_000))
+    assert discovery_cache.filesystem_fingerprint([root]) == before
 
 
 def test_lv2_mixed_valid_and_malformed_port_state_is_not_loadable(tmp_path, monkeypatch):
@@ -317,6 +387,42 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     project.save(project_path, compressed=False)
     reopened = xml_parser.load_project(project_path)
     assert base64.b64decode(reopened.find(".//vst3instrument/state").text) == state
+
+
+def test_vst3_preset_state_load_is_rooted_and_capped(tmp_path, monkeypatch):
+    root = tmp_path / "presets"
+    preset_path = root / "Warm Pad.vstpreset"
+    _write_vstpreset(preset_path, state=b"selected state")
+    plugin = _vst3_plugin(tmp_path / "Fixture Synth.vst3")
+    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [root])
+    indexed = vst3_presets.discover_vst3_presets([plugin], refresh=True)
+    preset, = indexed["presets"]
+    assert "state" not in preset
+    assert vst3_presets.load_vst3preset_state(preset, indexed["search_paths"])
+    monkeypatch.setattr(vst3_presets, "_MAX_COMPONENT_BYTES", 4)
+    assert vst3_presets.load_vst3preset_state(preset, indexed["search_paths"]) is None
+
+
+def test_vst3_preset_symlink_outside_search_root_is_not_indexed(tmp_path):
+    root = tmp_path / "configured"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    preset = outside / "External.vstpreset"
+    _write_vstpreset(preset)
+    (root / "external.vstpreset").symlink_to(preset)
+    assert vst3_presets._collect_files([root]) == []
+
+
+def test_vst3_preset_scan_has_file_count_and_aggregate_byte_caps(tmp_path, monkeypatch):
+    root = tmp_path / "presets"
+    _write_vstpreset(root / "A.vstpreset")
+    _write_vstpreset(root / "B.vstpreset")
+    monkeypatch.setattr(vst3_presets, "_MAX_PRESET_FILES", 1)
+    assert len(vst3_presets._collect_files([root])) == 1
+    monkeypatch.setattr(vst3_presets, "_MAX_PRESET_FILES", 10)
+    monkeypatch.setattr(vst3_presets, "_MAX_PRESET_TOTAL_BYTES", 1)
+    assert vst3_presets._collect_files([root]) == []
 
 
 def test_vst3_controller_state_preset_fails_without_mutating_project(tmp_path, monkeypatch):

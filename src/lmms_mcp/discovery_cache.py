@@ -7,9 +7,12 @@ import threading
 from pathlib import Path
 from typing import Callable, TypeVar
 
+from .path_safety import resolved_path_within
+
 T = TypeVar("T")
 _lock = threading.RLock()
 _entries: dict[str, tuple[tuple[tuple[object, ...], ...], object]] = {}
+_MAX_FINGERPRINT_ENTRIES = 100_000
 
 
 def _stat_signature(path: Path) -> tuple[object, ...] | None:
@@ -25,25 +28,38 @@ def filesystem_fingerprint(paths: list[str | Path]) -> tuple[tuple[object, ...],
     """Return an identity snapshot of directory trees without parsing files.
 
     Directory metadata detects additions and removals; file metadata detects
-    edits and replacements. Symlinked plugin bundles are followed once, while
-    unrelated links encountered inside a tree are recorded but not traversed.
+    edits and replacements. Configured roots establish their own resolved
+    boundary. Within one, only in-root .vst3/.lv2 directory links are followed;
+    external links and cycles are recorded/skipped, never traversed.
     """
     result: list[tuple[object, ...]] = []
     visited: set[str] = set()
 
-    def visit(path: Path, follow_root_link: bool = False) -> None:
+    def append(value: tuple[object, ...]) -> bool:
+        result.append(value)
+        return len(result) < _MAX_FINGERPRINT_ENTRIES
+
+    def visit(path: Path, allowed_root: Path, follow_root_link: bool = False) -> None:
         normalized = Path(os.path.abspath(path))
         try:
             is_link = normalized.is_symlink()
-            if is_link and follow_root_link:
+            if is_link:
+                if not append((str(normalized), "symlink", os.readlink(normalized))):
+                    return
+                resolved = resolved_path_within(normalized, allowed_root)
+                if resolved is None:
+                    return
+                normalized = resolved
+            elif follow_root_link:
                 normalized = normalized.resolve(strict=True)
             signature = _stat_signature(normalized)
-        except OSError:
+        except (OSError, RuntimeError):
             signature = None
         if signature is None:
-            result.append((str(normalized), "missing"))
+            append((str(normalized), "missing"))
             return
-        result.append(signature)
+        if not append(signature):
+            return
         try:
             if not normalized.is_dir():
                 return
@@ -54,32 +70,47 @@ def filesystem_fingerprint(paths: list[str | Path]) -> tuple[tuple[object, ...],
             with os.scandir(normalized) as iterator:
                 entries = sorted(iterator, key=lambda entry: entry.name)
             for entry in entries:
+                if len(result) >= _MAX_FINGERPRINT_ENTRIES:
+                    return
                 child = Path(entry.path)
                 try:
                     if entry.is_symlink():
-                        result.append((str(child), "symlink", os.readlink(child)))
-                        target = child.resolve(strict=True)
+                        if not append((str(child), "symlink", os.readlink(child))):
+                            return
+                        target = resolved_path_within(child, allowed_root)
+                        if target is None:
+                            continue
                         target_signature = _stat_signature(target)
                         if target_signature is not None:
-                            result.append(("symlink-target", *target_signature))
+                            if not append(("symlink-target", *target_signature)):
+                                return
                         if child.suffix.lower() in {".vst3", ".lv2"} and target.is_dir():
-                            visit(target)
+                            visit(target, allowed_root)
                         continue
                     child_stat = entry.stat(follow_symlinks=False)
-                    result.append((str(child), child_stat.st_dev, child_stat.st_ino,
+                    if not append((str(child), child_stat.st_dev, child_stat.st_ino,
                                    child_stat.st_mode, child_stat.st_size,
-                                   child_stat.st_mtime_ns, child_stat.st_ctime_ns))
+                                   child_stat.st_mtime_ns, child_stat.st_ctime_ns)):
+                        return
                     if entry.is_dir(follow_symlinks=False):
                         # The directory identity above is enough; visit adds its
                         # children and a duplicate signature is harmless.
-                        visit(child)
-                except OSError:
-                    result.append((str(child), "unreadable"))
-        except OSError:
-            result.append((str(normalized), "unreadable"))
+                        visit(child, allowed_root)
+                except (OSError, RuntimeError):
+                    append((str(child), "unreadable"))
+        except (OSError, RuntimeError):
+            append((str(normalized), "unreadable"))
 
     for raw_path in sorted({str(Path(p).expanduser()) for p in paths}):
-        visit(Path(raw_path), follow_root_link=True)
+        if len(result) >= _MAX_FINGERPRINT_ENTRIES:
+            break
+        configured = Path(os.path.abspath(raw_path))
+        try:
+            allowed_root = configured.resolve(strict=True)
+        except (OSError, RuntimeError):
+            append((str(configured), "missing"))
+            continue
+        visit(configured, allowed_root, follow_root_link=True)
     return tuple(result)
 
 

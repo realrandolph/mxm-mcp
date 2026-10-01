@@ -1671,7 +1671,8 @@ def load_native_plugin_preset(track_index: int, preset: str) -> str:
                      (key.findall("attribute") if key is not None else [])}
             module, cid = attrs.get("module", ""), attrs.get("cid", "")
             plugin_records = vst3_mod.discover_vst3_plugins()
-            indexed = vst3_presets.discover_vst3_presets(plugin_records)["presets"]
+            vst3_index = vst3_presets.discover_vst3_presets(plugin_records)
+            indexed = vst3_index["presets"]
             requested = Path(preset).expanduser()
             requested_source = str(requested.resolve()) if requested.exists() else preset
             selected = next((item for item in indexed
@@ -1683,10 +1684,12 @@ def load_native_plugin_preset(track_index: int, preset: str) -> str:
                 raise ValueError(
                     "This VST3 preset contains separate controller state that the current MMP serializer cannot embed"
                 )
-            if not selected.get("loadable") or not selected.get("state"):
+            state = vst3_presets.load_vst3preset_state(
+                selected, vst3_index["search_paths"])
+            if not selected.get("loadable") or not state:
                 raise ValueError("This preset format has no supported embedded VST3 component state")
             xml_parser.configure_native_vst3_instrument(
-                track, module, cid, state=selected["state"])
+                track, module, cid, state=state)
             result = {"host": kind, "preset": selected["name"],
                       "preset_source": selected["source"], "embedded": True}
         elif instrument.get("name") == "lv2instrument":

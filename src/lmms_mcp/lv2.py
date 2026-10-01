@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -10,12 +11,22 @@ from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import DC, RDF, RDFS
 
 from . import discovery_cache
+from .path_safety import resolved_path_within
 
 LV2 = "http://lv2plug.in/ns/lv2core#"
 PS = "http://lv2plug.in/ns/ext/presets#"
 DOAP = "http://usefulinc.com/ns/doap#"
 FOAF = "http://xmlns.com/foaf/0.1/"
 STATE = "http://lv2plug.in/ns/ext/state#"
+
+_MAX_SCAN_ENTRIES = 100_000
+_MAX_SEARCH_ROOTS = 4_096
+_MAX_BUNDLES = 2_048
+_MAX_RDF_FILES = 4_096
+_MAX_RDF_FILE_BYTES = 4 * 1024 * 1024
+_MAX_RDF_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_RDF_FILE_TRIPLES = 100_000
+_MAX_RDF_TOTAL_TRIPLES = 500_000
 
 
 def standard_lv2_dirs() -> list[Path]:
@@ -42,39 +53,58 @@ def effective_search_paths() -> list[Path]:
         if normalized not in seen:
             seen.add(normalized)
             result.append(Path(normalized))
-    return result
+    return result[:_MAX_SEARCH_ROOTS]
 
 
-def _find_bundles(roots: list[Path]) -> list[Path]:
-    result: dict[str, Path] = {}
+def _find_bundles(roots: list[Path]) -> list[tuple[Path, Path]]:
+    result: dict[str, tuple[Path, Path]] = {}
     visited: set[str] = set()
+    entries_seen = 0
 
-    def walk(directory: Path) -> None:
+    def walk(directory: Path, allowed_root: Path) -> None:
+        nonlocal entries_seen
         try:
-            resolved = str(directory.resolve())
+            resolved = str(directory.resolve(strict=True))
             if resolved in visited:
                 return
             visited.add(resolved)
             children = sorted(directory.iterdir(), key=lambda child: child.name.casefold())
-        except OSError:
+        except (OSError, RuntimeError):
             return
         for child in children:
+            entries_seen += 1
+            if entries_seen > _MAX_SCAN_ENTRIES or len(result) >= _MAX_BUNDLES:
+                return
             try:
-                if child.suffix.lower() == ".lv2" and child.is_dir():
-                    resolved_bundle = child.resolve()
-                    result[str(resolved_bundle)] = resolved_bundle
-                elif child.is_dir() and not child.is_symlink():
-                    walk(child)
-            except OSError:
+                if child.is_symlink():
+                    resolved_bundle = resolved_path_within(child, allowed_root)
+                    if resolved_bundle is None or not resolved_bundle.is_dir():
+                        continue
+                    real_parent = child.parent.resolve()
+                    if (resolved_bundle == real_parent
+                            or resolved_bundle in real_parent.parents):
+                        continue
+                else:
+                    resolved_bundle = child
+                if child.suffix.lower() == ".lv2" and resolved_bundle.is_dir():
+                    result[str(resolved_bundle)] = (resolved_bundle, allowed_root)
+                elif resolved_bundle.is_dir() and not child.is_symlink():
+                    walk(resolved_bundle, allowed_root)
+            except (OSError, RuntimeError):
                 continue
 
-    for root in roots:
-        if root.suffix.lower() == ".lv2" and root.is_dir():
-            resolved = root.resolve()
-            result[str(resolved)] = resolved
-        elif root.is_dir():
-            walk(root)
-    return sorted(result.values(), key=lambda path: str(path).casefold())
+    for root in roots[:_MAX_SEARCH_ROOTS]:
+        if len(result) >= _MAX_BUNDLES or entries_seen >= _MAX_SCAN_ENTRIES:
+            break
+        try:
+            resolved_root = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if root.suffix.lower() == ".lv2" and resolved_root.is_dir():
+            result[str(resolved_root)] = (resolved_root, resolved_root)
+        elif resolved_root.is_dir():
+            walk(resolved_root, resolved_root)
+    return sorted(result.values(), key=lambda item: str(item[0]).casefold())
 
 
 def _text(graph: Graph, subject, predicate) -> str | None:
@@ -101,33 +131,120 @@ def _namespaces() -> tuple[URIRef, ...]:
     )
 
 
-def _load_bundle(bundle: Path) -> tuple[Graph, dict[str, str]]:
-    graph = Graph()
-    source_by_subject: dict[str, str] = {}
-    files: list[Path] = []
-    try:
-        files = sorted((path for path in bundle.rglob("*")
-                        if path.is_file() and path.suffix.lower() in {".ttl", ".rdf", ".n3"}),
-                       key=lambda path: str(path).casefold())
-    except OSError:
-        pass
-    manifest = bundle / "manifest.ttl"
-    if manifest.is_file() and manifest not in files:
-        files.insert(0, manifest)
-    for source in files:
+class _RdfLimitExceeded(Exception):
+    """Raised as soon as parsing would exceed a configured RDF triple bound."""
+
+
+class _BoundedGraph(Graph):
+    def __init__(self, max_triples: int):
+        super().__init__()
+        self.max_triples = max_triples
+
+    def add(self, triple):
+        if len(self) >= self.max_triples:
+            raise _RdfLimitExceeded("RDF triple limit exceeded")
+        return super().add(triple)
+
+
+class _RdfBudget:
+    def __init__(self):
+        self.files = 0
+        self.bytes = 0
+        self.triples = 0
+        self.entries = 0
+
+
+def _rdf_files(bundle: Path, allowed_root: Path, budget: _RdfBudget) -> list[Path]:
+    files: dict[str, Path] = {}
+    visited: set[str] = set()
+    def walk(directory: Path) -> None:
         try:
-            parsed = Graph()
+            real = str(directory.resolve(strict=True))
+            if real in visited or resolved_path_within(directory, allowed_root) is None:
+                return
+            visited.add(real)
+            entries = sorted(directory.iterdir(), key=lambda path: str(path).casefold())
+        except (OSError, RuntimeError):
+            return
+        for path in entries:
+            budget.entries += 1
+            if (budget.entries > _MAX_SCAN_ENTRIES
+                    or budget.files + len(files) >= _MAX_RDF_FILES):
+                return
+            try:
+                if path.is_symlink():
+                    resolved = resolved_path_within(path, allowed_root)
+                    if resolved is None:
+                        continue
+                else:
+                    resolved = path
+                if resolved.is_dir():
+                    # A symlinked bundle is allowed, but arbitrary links are
+                    # not recursive traversal roots.
+                    if not path.is_symlink():
+                        walk(resolved)
+                elif resolved.is_file() and resolved.suffix.lower() in {".ttl", ".rdf", ".n3"}:
+                    files[str(resolved)] = resolved
+            except OSError:
+                continue
+
+    walk(bundle)
+    manifest = bundle / "manifest.ttl"
+    resolved_manifest = resolved_path_within(manifest, allowed_root)
+    ordered = sorted(files.values(), key=lambda path: str(path).casefold())
+    if resolved_manifest is not None and resolved_manifest.is_file():
+        ordered = [resolved_manifest] + [path for path in ordered
+                                         if path != resolved_manifest]
+    return ordered[:max(0, _MAX_RDF_FILES - budget.files)]
+
+
+def _load_bundle(bundle: Path, allowed_root: Path,
+                 budget: _RdfBudget) -> tuple[Graph, dict[str, str]]:
+    graph = _BoundedGraph(_MAX_RDF_TOTAL_TRIPLES - budget.triples)
+    source_by_subject: dict[str, str] = {}
+    for source in _rdf_files(bundle, allowed_root, budget):
+        if (budget.files >= _MAX_RDF_FILES or budget.bytes >= _MAX_RDF_TOTAL_BYTES
+                or len(graph) >= graph.max_triples):
+            break
+        budget.files += 1
+        try:
+            size = source.stat().st_size
+            remaining = _MAX_RDF_TOTAL_BYTES - budget.bytes
+            limit = min(_MAX_RDF_FILE_BYTES, remaining)
+            if size > limit:
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(source, flags)
+            with os.fdopen(descriptor, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    continue
+                raw = stream.read(limit + 1)
+            budget.bytes += min(len(raw), remaining)
+            if len(raw) != size or len(raw) > limit:
+                continue
+            # RDF/XML's external-entity features are unnecessary for LV2
+            # metadata and are rejected before invoking the XML parser.
+            lowered = raw.lower()
+            if source.suffix.lower() == ".rdf" and (
+                    b"<!doctype" in lowered or b"<!entity" in lowered):
+                continue
+            parsed = _BoundedGraph(_MAX_RDF_FILE_TRIPLES)
             rdf_format = {".ttl": "turtle", ".n3": "n3", ".rdf": "xml"}.get(
                 source.suffix.lower())
-            parsed.parse(source.as_posix(), format=rdf_format)
+            parsed.parse(data=raw, publicID=source.as_uri(), format=rdf_format)
+            new_triples = [triple for triple in parsed if triple not in graph]
+            if len(graph) + len(new_triples) > graph.max_triples:
+                continue
             for subject in set(parsed.subjects()):
-                source_by_subject.setdefault(str(subject), str(source.resolve()))
-            for triple in parsed:
+                source_by_subject.setdefault(str(subject), str(source))
+            for triple in new_triples:
                 graph.add(triple)
         except Exception:
             # A broken optional metadata file should not hide valid plugins in
             # the same bundle. The bundle remains discoverable from other RDF.
             continue
+    budget.triples += len(graph)
     return graph, source_by_subject
 
 
@@ -143,8 +260,9 @@ def _origin(bundle: Path, source: str) -> str:
     return "unknown"
 
 
-def _bundle_index(bundle: Path) -> tuple[list[dict], list[dict]]:
-    graph, source_by_subject = _load_bundle(bundle)
+def _bundle_index(bundle: Path, allowed_root: Path,
+                  budget: _RdfBudget) -> tuple[list[dict], list[dict]]:
+    graph, source_by_subject = _load_bundle(bundle, allowed_root, budget)
     plugin_types = _namespaces()
     candidates: set[URIRef] = set()
     for plugin_type in plugin_types:
@@ -294,8 +412,12 @@ def discover_lv2(refresh: bool = False) -> dict:
     def build() -> dict:
         plugins: list[dict] = []
         presets: list[dict] = []
-        for bundle in _find_bundles(paths):
-            bundle_plugins, bundle_presets = _bundle_index(bundle)
+        budget = _RdfBudget()
+        for bundle, allowed_root in _find_bundles(paths):
+            if budget.files >= _MAX_RDF_FILES or budget.bytes >= _MAX_RDF_TOTAL_BYTES \
+                    or budget.triples >= _MAX_RDF_TOTAL_TRIPLES:
+                break
+            bundle_plugins, bundle_presets = _bundle_index(bundle, allowed_root, budget)
             plugins.extend(bundle_plugins)
             presets.extend(bundle_presets)
         plugins.sort(key=lambda item: (item["name"].casefold(), item["uri"].casefold()))

@@ -227,6 +227,14 @@ roots. Factory/user origin and optional metadata are reported only when
 available. Refresh after installing or updating plugins/presets; indexes
 otherwise reuse filesystem-identity-checked cached results.
 
+VST3 factory probing loads third-party module code. On Linux systems with
+Landlock support, the probe process is confined to read-only runtime/plugin
+paths and a private writable scratch directory; network and cross-process
+control syscalls are blocked, and CPU, memory, file-size and output are capped.
+That sandbox is not yet implemented for Windows/macOS or Linux kernels without
+Landlock. To avoid breaking normal discovery, those systems retain the existing
+separate-process probe, which is crash isolation only—not a security sandbox.
+
 `load_native_plugin_preset` embeds VST3 component chunks or LV2 input-control
 port values into the MMP project. Preset formats without a known compatible
 project-state representation are listed but marked non-loadable; opaque state

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp import vst3, vst3_probe, xml_parser
+from lmms_mcp import vst3, vst3_probe, vst3_sandbox, xml_parser
 from lmms_mcp import vst3_platform as plat
 from lmms_mcp import server as srv
 from lmms_mcp.project import LMMSProject
@@ -171,6 +171,23 @@ class TestVst3Discovery:
         monkeypatch.setenv("VST3_PATH", str(tmp_path))
         assert {p.name for p in vst3.find_vst3_bundles()} == {
             "Real.vst3", "Top.vst3", "Inner.vst3"}
+
+    def test_vst3_symlink_bundles_are_confined_to_the_configured_root(
+            self, tmp_path, monkeypatch):
+        root = tmp_path / "configured"
+        root.mkdir()
+        inside = root / "Inside.vst3"
+        inside.mkdir()
+        outside = tmp_path / "Outside.vst3"
+        outside.mkdir()
+        (root / "Inside alias.vst3").symlink_to(inside, target_is_directory=True)
+        (root / "Outside alias.vst3").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [root])
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        monkeypatch.delenv("VST3_PATH", raising=False)
+        found = vst3.find_vst3_bundles()
+        assert len(found) == 1
+        assert found[0].resolve() == inside.resolve()
 
     def test_relative_vst3_path_is_absolute(self, tmp_path, monkeypatch):
         (tmp_path / "sub" / "Inner.vst3").mkdir(parents=True)
@@ -673,3 +690,61 @@ class TestVst3ProbeCtypes:
         assert vst3_probe.main([str(bundle)]) == 0
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["classes"][0]["name"] == UNICODE_NAME
+
+    @pytest.mark.skipif(not plat.LINUX, reason="Linux Landlock/seccomp sandbox")
+    def test_default_probe_discovers_fixture_inside_linux_sandbox(self, tmp_path):
+        if not vst3_sandbox.sandbox_available():
+            pytest.skip("kernel does not provide Landlock/seccomp")
+        bundle = _build_fake_bundle(tmp_path)
+        result = vst3._probe_bundle(bundle)
+        assert result.get("classes", [{}])[0].get("cid") == FAKE_CID, result
+
+    @pytest.mark.skipif(not plat.LINUX, reason="Linux Landlock/seccomp sandbox")
+    def test_linux_probe_sandbox_blocks_out_of_root_io_and_network(self, tmp_path):
+        if not vst3_sandbox.sandbox_available():
+            pytest.skip("kernel does not provide Landlock/seccomp")
+        import sys
+
+        bundle = tmp_path / "Fixture.vst3"
+        scratch = tmp_path / "scratch"
+        bundle.mkdir()
+        scratch.mkdir()
+        inside = bundle / "readable.txt"
+        inside.write_text("plugin data")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("must remain inaccessible")
+        source_root = Path(vst3_sandbox.__file__).resolve().parents[1]
+        code = textwrap.dedent(f"""
+            import pathlib, socket
+            from lmms_mcp.vst3_sandbox import enter_linux_sandbox
+            bundle = pathlib.Path({str(bundle)!r})
+            scratch = pathlib.Path({str(scratch)!r})
+            outside = pathlib.Path({str(outside)!r})
+            enter_linux_sandbox(bundle, scratch)
+            assert (bundle / "readable.txt").read_text() == "plugin data"
+            try:
+                outside.read_text()
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("outside file read was not confined")
+            try:
+                outside.write_text("escaped")
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("outside file write was not confined")
+            try:
+                socket.socket()
+            except OSError:
+                pass
+            else:
+                raise AssertionError("network socket was not blocked")
+            (scratch / "plugin-cache").write_text("allowed scratch")
+        """)
+        env = dict(os.environ, PYTHONPATH=str(source_root))
+        proc = subprocess.run([sys.executable, "-c", code], cwd=scratch, env=env,
+                              capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 0, proc.stderr
+        assert outside.read_text() == "must remain inaccessible"
+        assert (scratch / "plugin-cache").read_text() == "allowed scratch"

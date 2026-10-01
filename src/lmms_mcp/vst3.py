@@ -12,19 +12,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import discovery_cache
 from . import lmms_app
+from . import vst3_sandbox
 from . import vst3_platform as plat
+from .path_safety import resolved_path_within
 
 #! MXM enables path-only mode on mere presence (std::getenv), so test for the
 #! key, not its truthiness.
 PATH_ONLY_ENV = "MXM_VST3_PATH_ONLY"
 
 _PROBE_TIMEOUT_SECONDS = 30
+_PROBE_OUTPUT_LIMIT = 4 * 1024 * 1024
+_MAX_DISCOVERY_ENTRIES = 100_000
+_MAX_DISCOVERY_BUNDLES = 4_096
+_MAX_SEARCH_ROOTS = 4_096
 _AUDIO_MODULE = "Audio Module Class"
 _CID_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 
@@ -63,10 +71,11 @@ def _vst3_path_entries(raw: str) -> list[str]:
 def effective_search_paths() -> list[str]:
     """Directories actually scanned (honours path-only), for reporting."""
     paths = [str(d) for d in standard_vst3_dirs()] if not path_only_enabled() else []
-    return paths + _vst3_path_entries(os.environ.get("VST3_PATH", ""))
+    return (paths + _vst3_path_entries(os.environ.get("VST3_PATH", "")))[:_MAX_SEARCH_ROOTS]
 
 
-def _collect(directory, result, seen, dirs_only=False, visited=None):
+def _collect(directory, result, seen, dirs_only=False, visited=None, allowed_root=None,
+             scan_state=None):
     """Recursively collect ``.vst3`` entries (case-sensitive, like MXM).
 
     ``dirs_only`` mirrors MXM's ``QDir::Dirs`` scan for ``VST3_PATH``; the
@@ -74,34 +83,67 @@ def _collect(directory, result, seen, dirs_only=False, visited=None):
     A ``.vst3`` entry is never descended into.
     """
     visited = set() if visited is None else visited
+    directory = Path(directory)
+    allowed_root = Path(directory).resolve() if allowed_root is None else allowed_root
+    scan_state = {"entries": 0} if scan_state is None else scan_state
     try:
-        real_path = os.path.realpath(directory)
+        real_path = str(Path(directory).resolve(strict=True))
         if real_path in visited:
             return
         visited.add(real_path)
         entries = sorted(directory.iterdir())
-    except OSError:
+    except (OSError, RuntimeError):
         return
     for entry in entries:
-        if entry.suffix == ".vst3" and (entry.is_dir() or not dirs_only):
-            key = str(entry)
+        scan_state["entries"] += 1
+        if (scan_state["entries"] > _MAX_DISCOVERY_ENTRIES
+                or len(result) >= _MAX_DISCOVERY_BUNDLES):
+            return
+        try:
+            is_link = entry.is_symlink()
+            if is_link:
+                resolved = resolved_path_within(entry, allowed_root)
+                if resolved is None:
+                    continue
+                real_parent = entry.parent.resolve()
+                if resolved == real_parent or resolved in real_parent.parents:
+                    continue
+            else:
+                resolved = entry
+            is_dir = resolved.is_dir()
+            is_file = resolved.is_file()
+        except (OSError, RuntimeError):
+            continue
+        if entry.suffix == ".vst3" and (is_dir or (is_file and not dirs_only)):
+            key = str(resolved)
             if key not in seen:
                 seen.add(key)
-                result.append(entry)
-        elif entry.is_dir():
-            _collect(entry, result, seen, dirs_only, visited)
+                result.append(resolved)
+        elif is_dir and not is_link:
+            _collect(resolved, result, seen, dirs_only, visited, allowed_root, scan_state)
 
 
-def _add_bundles_from_path(path, result, seen):
+def _add_bundles_from_path(path, result, seen, scan_state=None):
     """Collect from one ``VST3_PATH``/extra entry (verbatim bundle, else dir)."""
+    path = Path(os.path.abspath(path))
     if not path.exists():
         return
     if path.suffix == ".vst3":
-        if str(path) not in seen:
-            seen.add(str(path))
-            result.append(path)
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return
+        key = str(resolved)
+        if key not in seen and len(result) < _MAX_DISCOVERY_BUNDLES:
+            seen.add(key)
+            result.append(resolved)
     elif path.is_dir():
-        _collect(Path(os.path.abspath(path)), result, seen, dirs_only=True)
+        try:
+            root = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return
+        _collect(root, result, seen, dirs_only=True, allowed_root=root,
+                 scan_state=scan_state)
 
 
 def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
@@ -112,35 +154,82 @@ def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
     """
     bundles: list[Path] = []
     seen: set[str] = set()
+    scan_state = {"entries": 0}
     if not path_only_enabled():
-        for directory in standard_vst3_dirs():
+        for directory in standard_vst3_dirs()[:_MAX_SEARCH_ROOTS]:
+            if len(bundles) >= _MAX_DISCOVERY_BUNDLES:
+                break
             if directory.is_dir():
-                _collect(directory, bundles, seen)
+                try:
+                    root = directory.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                _collect(root, bundles, seen, allowed_root=root, scan_state=scan_state)
     raw = _vst3_path_entries(os.environ.get("VST3_PATH", ""))
-    for entry in [str(part).strip() for part in (raw + list(extra_paths or []))]:
+    extra = list(extra_paths or [])
+    for entry in [str(part).strip() for part in (raw + extra)[:_MAX_SEARCH_ROOTS]]:
+        if len(bundles) >= _MAX_DISCOVERY_BUNDLES:
+            break
         if entry:
-            _add_bundles_from_path(Path(entry), bundles, seen)
+            _add_bundles_from_path(Path(entry), bundles, seen, scan_state)
     return bundles
 
 
 def _probe_bundle(bundle: Path) -> dict:
-    """Introspect one bundle in an isolated subprocess and parse its JSON."""
+    """Introspect one bundle, using Linux filesystem/syscall confinement when available."""
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
-        )
+        if not (plat.LINUX and vst3_sandbox.sandbox_available()):
+            # Preserve normal discovery on Windows/macOS and older Linux
+            # kernels; those platforms still have process isolation only.
+            proc = subprocess.run(
+                [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
+                capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+            stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+        else:
+            with tempfile.TemporaryDirectory(prefix="lmms-vst3-probe-") as scratch:
+                env = {key: os.environ[key] for key in
+                       ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "LD_LIBRARY_PATH",
+                        "LD_BIND_NOW") if key in os.environ}
+                env.update({"HOME": scratch, "TMPDIR": scratch, "TMP": scratch,
+                            "TEMP": scratch, "PYTHONDONTWRITEBYTECODE": "1",
+                            "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
+                bundle_path = Path(bundle).resolve(strict=True)
+                allowed_root = bundle_path.parent
+                command = [sys.executable, "-m", "lmms_mcp.vst3_probe",
+                           "--sandbox", scratch, str(allowed_root), str(bundle_path)]
+                with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                    proc = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=stdout_file,
+                        stderr=stderr_file, cwd=scratch, env=env, start_new_session=True,
+                    )
+                    try:
+                        proc.wait(timeout=_PROBE_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                        return {"module": str(bundle), "error": "VST3 probe timed out"}
+                    stdout_file.seek(0)
+                    stderr_file.seek(0)
+                    stdout = stdout_file.read(_PROBE_OUTPUT_LIMIT + 1).decode(
+                        "utf-8", "replace")
+                    stderr = stderr_file.read(_PROBE_OUTPUT_LIMIT + 1).decode(
+                        "utf-8", "replace")
+                    if len(stdout.encode("utf-8")) > _PROBE_OUTPUT_LIMIT \
+                            or len(stderr.encode("utf-8")) > _PROBE_OUTPUT_LIMIT:
+                        return {"module": str(bundle), "error": "VST3 probe output limit exceeded"}
+                    returncode = proc.returncode
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"module": str(bundle), "error": f"{type(exc).__name__}: {exc}"}
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
             return payload
-    message = (proc.stderr or proc.stdout).strip()
-    return {"module": str(bundle), "error": message or f"probe exited {proc.returncode}"}
+    message = (stderr or stdout).strip()
+    return {"module": str(bundle), "error": message or f"probe exited {returncode}"}
 
 
 def discover_vst3_plugins(
