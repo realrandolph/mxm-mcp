@@ -72,6 +72,46 @@ def test_elicitation_allow_once_executes_exact_binary_once(tmp_path, monkeypatch
     assert probes == [bundle]  # cached metadata no longer executes plugin code
 
 
+def test_plugin_name_filter_does_not_authorize_unrelated_vst3_bundles(
+        tmp_path, monkeypatch):
+    target = tmp_path / "Zebralette3.vst3"
+    unrelated = tmp_path / "Other Synth.vst3"
+    target.mkdir()
+    unrelated.mkdir()
+    identities = {
+        str(bundle): plugin_permissions.PluginIdentity(
+            str(bundle), str(bundle / "module.so"), ("a" if bundle == target else "b") * 64,
+        )
+        for bundle in (target, unrelated)
+    }
+    identified = []
+    discovered = []
+    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [unrelated, target])
+    monkeypatch.setattr(vst3_probe, "bundle_binary", lambda bundle: Path(bundle) / "module.so")
+
+    def identify(module, _binary):
+        identified.append(Path(module))
+        return identities[str(Path(module))]
+
+    monkeypatch.setattr(plugin_permissions, "identify_plugin", identify)
+    monkeypatch.setattr(plugin_permissions, "cached_probe", lambda _identity: {"classes": []})
+
+    def discover(**kwargs):
+        discovered.extend(kwargs["bundles"])
+        return [{"module": str(target), "name": "Zebralette3", "is_instrument": True}]
+
+    monkeypatch.setattr(vst3, "discover_vst3_plugins", discover)
+    plugins, denied = asyncio.run(server._authorized_vst3_plugins(
+        FakeContext(capabilities=False), "list_plugin_presets", {},
+        plugin_query="Zebralette3",
+    ))
+
+    assert [Path(item["module"]) for item in plugins] == [target]
+    assert denied == []
+    assert identified == [target]
+    assert discovered == [target]
+
+
 def test_elicitation_permanent_allow_and_deny_are_binary_scoped(tmp_path, monkeypatch):
     bundle, _binary, probes = _synthetic_bundle(tmp_path, monkeypatch)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))

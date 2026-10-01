@@ -159,7 +159,7 @@ def test_vst3_preset_container_metadata_association_and_embedded_component_state
     preset_path = tmp_path / "Factory" / "Warm Pad.vstpreset"
     component_state = _write_vstpreset(preset_path)
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
-                        lambda plugins=None: [preset_path.parent])
+                        lambda plugins=None, **kwargs: [preset_path.parent])
     parsed = vst3_presets.parse_vstpreset(preset_path, include_state=True)
     assert parsed["cid"] == CID
     assert parsed["name"] == "Warm Pad"
@@ -202,7 +202,8 @@ def test_vst3_user_factory_preset_banks_and_h2p_are_indexed_without_fake_metadat
     _write_vstpreset(factory / "Factory Lead.vstpreset")
     (user / "User Lead.h2p").parent.mkdir(parents=True)
     (user / "User Lead.h2p").write_text("# opaque user preset")
-    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [root])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths",
+                        lambda plugins=None, **kwargs: [root])
     plugin = _vst3_plugin(tmp_path / "Fixture Synth.vst3")
     presets = vst3_presets.discover_vst3_presets([plugin], refresh=True)["presets"]
     by_name = {item["name"]: item for item in presets}
@@ -211,6 +212,108 @@ def test_vst3_user_factory_preset_banks_and_h2p_are_indexed_without_fake_metadat
     assert by_name["User Lead"]["origin"] == "user"
     assert by_name["User Lead"]["author"] is None
     assert by_name["User Lead"]["loadable"] is False
+
+
+def test_plugin_scoped_vst3_preset_search_uses_plugin_roots_only(tmp_path, monkeypatch):
+    search_root = tmp_path / "u-he"
+    target_bundle = tmp_path / "plugins" / "Zebralette3.vst3"
+    target_bundle.mkdir(parents=True)
+    target_root = search_root / "Zebralette3.data" / "Presets"
+    other_root = search_root / "Hive.data" / "Presets"
+    _write_vstpreset(target_root / "Factory" / "Warm Pad.vstpreset")
+    _write_vstpreset(other_root / "Factory" / "Other.vstpreset")
+    plugin = {**_vst3_plugin(target_bundle), "name": "Zebralette3", "vendor": "u-he"}
+    monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [search_root])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
+    for variable in ("VST3_PRESET_PATH", "UHE_PRESET_PATH", "VST3_PATH"):
+        monkeypatch.delenv(variable, raising=False)
+
+    paths = vst3_presets.preset_search_paths([plugin], plugin_scoped=True)
+    assert search_root not in paths
+    assert target_root in paths
+    assert other_root not in paths
+
+    index = vst3_presets.discover_vst3_presets(
+        [plugin], plugin_scoped=True, refresh=True,
+    )
+    assert [item["name"] for item in index["presets"]] == ["Warm Pad"]
+
+
+def test_plugin_filtered_preset_tool_indexes_only_matching_vst3_records(monkeypatch):
+    target = {**_vst3_plugin(Path("/plugins/Zebralette3.vst3")),
+              "name": "Zebralette3"}
+    unrelated = {**_vst3_plugin(Path("/plugins/Other Synth.vst3")),
+                 "name": "Other Synth", "cid": "CD" * 16}
+    authorized_queries = []
+    indexed = []
+
+    async def authorize(_ctx, _action, _arguments, **kwargs):
+        authorized_queries.append(kwargs["plugin_query"])
+        return [target, unrelated], []
+
+    def discover(records, *, refresh=False, plugin_scoped=False):
+        indexed.append((records, refresh, plugin_scoped))
+        return {"presets": [{"name": "Warm Pad", "plugin_name": "Zebralette3",
+                              "plugin_cid": CID, "plugin_module": target["module"]}]}
+
+    monkeypatch.setattr(server, "_authorized_vst3_plugins", authorize)
+    monkeypatch.setattr(vst3_presets, "discover_vst3_presets", discover)
+
+    result = json.loads(_run_tool(server.list_plugin_presets(
+        "vst3", plugin="Zebralette3", limit=200,
+    )))
+
+    assert authorized_queries == ["Zebralette3"]
+    assert indexed == [([target], False, True)]
+    assert result["total"] == 1
+    assert result["presets"][0]["name"] == "Warm Pad"
+
+
+def test_plugin_scoped_preset_cache_fingerprints_and_builds_per_plugin(
+        tmp_path, monkeypatch):
+    global_root = tmp_path / "u-he"
+    bundle_root = tmp_path / "plugins"
+    first_bundle = bundle_root / "Zebralette3.vst3"
+    second_bundle = bundle_root / "Hive.vst3"
+    first_bundle.mkdir(parents=True)
+    second_bundle.mkdir(parents=True)
+    first_preset_root = global_root / "Zebralette3.data" / "Presets"
+    second_preset_root = global_root / "Hive.data" / "Presets"
+    _write_vstpreset(first_preset_root / "Warm Pad.vstpreset")
+    _write_vstpreset(second_preset_root / "Bass.vstpreset", cid="CD" * 16)
+    first_plugin = {**_vst3_plugin(first_bundle), "name": "Zebralette3", "vendor": "u-he"}
+    second_plugin = {**_vst3_plugin(second_bundle), "name": "Hive", "cid": "CD" * 16,
+                     "vendor": "u-he"}
+    monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [global_root])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
+    for variable in ("VST3_PRESET_PATH", "UHE_PRESET_PATH", "VST3_PATH"):
+        monkeypatch.delenv(variable, raising=False)
+    build_paths = []
+    fingerprint_paths = []
+    original_collect = vst3_presets._collect_files
+    original_fingerprint = discovery_cache.filesystem_fingerprint
+
+    def collect(paths):
+        build_paths.append(tuple(paths))
+        return original_collect(paths)
+
+    def fingerprint(paths):
+        fingerprint_paths.append(tuple(paths))
+        return original_fingerprint(paths)
+
+    monkeypatch.setattr(vst3_presets, "_collect_files", collect)
+    monkeypatch.setattr(discovery_cache, "filesystem_fingerprint", fingerprint)
+
+    first = vst3_presets.discover_vst3_presets([first_plugin], plugin_scoped=True)
+    second = vst3_presets.discover_vst3_presets([second_plugin], plugin_scoped=True)
+    first_again = vst3_presets.discover_vst3_presets([first_plugin], plugin_scoped=True)
+
+    assert first_again is first
+    assert len(build_paths) == 2  # separate plugin indexes; first one is warm-cached
+    assert len(fingerprint_paths) == 3
+    assert all(global_root not in paths for paths in fingerprint_paths)
+    assert all(global_root not in paths for paths in build_paths)
+    assert [item["name"] for item in second["presets"]] == ["Warm Pad"]
 
 
 def test_lv2_manifest_and_referenced_rdf_expose_plugins_ports_and_presets(tmp_path, monkeypatch):
@@ -373,7 +476,8 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     plugin = _vst3_plugin(plugin_bundle)
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
     monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
-    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [tmp_path])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths",
+                        lambda plugins=None, **kwargs: [tmp_path])
     project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
     xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
     server.set_project(project)
@@ -400,7 +504,8 @@ def test_vst3_preset_state_load_is_rooted_and_capped(tmp_path, monkeypatch):
     preset_path = root / "Warm Pad.vstpreset"
     _write_vstpreset(preset_path, state=b"selected state")
     plugin = _vst3_plugin(tmp_path / "Fixture Synth.vst3")
-    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [root])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths",
+                        lambda plugins=None, **kwargs: [root])
     indexed = vst3_presets.discover_vst3_presets([plugin], refresh=True)
     preset, = indexed["presets"]
     assert "state" not in preset
@@ -439,7 +544,8 @@ def test_vst3_controller_state_preset_fails_without_mutating_project(tmp_path, m
     plugin = _vst3_plugin(plugin_bundle)
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
     monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
-    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [tmp_path])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths",
+                        lambda plugins=None, **kwargs: [tmp_path])
     project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
     xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
     project._modified = False
@@ -480,7 +586,8 @@ def test_native_plugin_and_preset_tools_filter_and_refresh(tmp_path, monkeypatch
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [])
     monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
     monkeypatch.setattr(vst3, "effective_search_paths", lambda: [])
-    monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [])
+    monkeypatch.setattr(vst3_presets, "preset_search_paths",
+                        lambda plugins=None, **kwargs: [])
     monkeypatch.delenv("LV2_PATH", raising=False)
     plugins = json.loads(_run_tool(server.list_native_plugins("lv2")))
     assert plugins["count"] == 1

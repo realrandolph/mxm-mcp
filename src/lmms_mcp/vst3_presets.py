@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 import sys
@@ -50,30 +51,80 @@ def standard_preset_dirs() -> list[Path]:
     return roots
 
 
-def preset_search_paths(plugins: list[dict] | None = None) -> list[Path]:
-    """Roots searched for standard presets and vendor-specific preset banks."""
-    paths = standard_preset_dirs()
-    paths += _path_entries("VST3_PRESET_PATH")
-    paths += _path_entries("UHE_PRESET_PATH")
-    # VST3_PATH is also a useful preset root: many vendors keep Presets or
-    # <Plugin>.data banks beside their installed bundles.
-    paths += _path_entries("VST3_PATH")
-    paths += vst3.standard_vst3_dirs()
-    for plugin in plugins or []:
-        bundle = Path(plugin.get("module", ""))
-        if not bundle:
-            continue
-        name = str(plugin.get("name", "")).strip()
-        if not name:
-            continue
-        paths.extend([
-            bundle / "Contents/Resources/Presets",
-            bundle / "Presets",
-            bundle.parent / f"{name}.data/Presets",
-            bundle.parent / name / "Presets",
-            Path.home() / "Documents/u-he" / f"{name}.data/Presets",
-            Path.home() / ".u-he" / f"{name}.data/Presets",
-        ])
+def preset_search_paths(
+    plugins: list[dict] | None = None,
+    *,
+    plugin_scoped: bool = False,
+) -> list[Path]:
+    """Return global roots or likely preset roots for only the given plugins."""
+    plugins = plugins or []
+    if plugin_scoped:
+        # A filtered query should not recursively walk global preset/plugin
+        # roots. Search common product/vendor subdirectories and paths adjacent
+        # to each selected bundle instead.
+        bases = standard_preset_dirs()
+        bases += _path_entries("VST3_PRESET_PATH")
+        bases += _path_entries("UHE_PRESET_PATH")
+        paths: list[Path] = []
+        for plugin in plugins:
+            bundle = Path(plugin.get("module", ""))
+            name = str(plugin.get("name", "")).strip()
+            vendor = str(plugin.get("vendor", "")).strip()
+            if not bundle or not name:
+                continue
+            paths.extend([
+                bundle / "Contents/Resources/Presets",
+                bundle / "Presets",
+                bundle.parent / f"{name}.data/Presets",
+                bundle.parent / name / "Presets",
+            ])
+            aliases = {name, bundle.stem}
+            for base in bases:
+                for alias in aliases:
+                    product_dirs = (
+                        Path(alias),
+                        Path(f"{alias}.data"),
+                        Path(f"{alias}.data/Presets"),
+                        Path(alias) / "Presets",
+                    )
+                    for product_dir in product_dirs:
+                        paths.append(base / product_dir)
+                        if vendor:
+                            paths.append(base / vendor / product_dir)
+                # A user-configured root explicitly named for this plugin is
+                # itself a narrow, safe search root.
+                normalized_names = {
+                    "".join(char for char in alias.casefold() if char.isalnum())
+                    for alias in aliases
+                }
+                normalized_base = "".join(char for char in base.name.casefold()
+                                           if char.isalnum())
+                if any(name_key and name_key in normalized_base
+                       for name_key in normalized_names):
+                    paths.append(base)
+    else:
+        paths = standard_preset_dirs()
+        paths += _path_entries("VST3_PRESET_PATH")
+        paths += _path_entries("UHE_PRESET_PATH")
+        # VST3_PATH is also a useful preset root: many vendors keep Presets or
+        # <Plugin>.data banks beside their installed bundles.
+        paths += _path_entries("VST3_PATH")
+        paths += vst3.standard_vst3_dirs()
+        for plugin in plugins:
+            bundle = Path(plugin.get("module", ""))
+            if not bundle:
+                continue
+            name = str(plugin.get("name", "")).strip()
+            if not name:
+                continue
+            paths.extend([
+                bundle / "Contents/Resources/Presets",
+                bundle / "Presets",
+                bundle.parent / f"{name}.data/Presets",
+                bundle.parent / name / "Presets",
+                Path.home() / "Documents/u-he" / f"{name}.data/Presets",
+                Path.home() / ".u-he" / f"{name}.data/Presets",
+            ])
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths:
@@ -301,10 +352,11 @@ def discover_vst3_presets(
     plugins: list[dict] | None = None,
     *,
     refresh: bool = False,
+    plugin_scoped: bool = False,
 ) -> dict:
-    """Index standard VST3 presets and filesystem-friendly u-he preset banks."""
+    """Index VST3 presets globally or within roots associated with plugins."""
     plugins = plugins if plugins is not None else vst3.discover_vst3_plugins(refresh=refresh)
-    paths = preset_search_paths(plugins)
+    paths = preset_search_paths(plugins, plugin_scoped=plugin_scoped)
 
     def build() -> dict:
         presets: list[dict] = []
@@ -323,9 +375,13 @@ def discover_vst3_presets(
                                        item["source"].casefold()))
         return {"presets": presets, "search_paths": [str(path) for path in paths]}
 
-    return discovery_cache.cached_discovery(
-        "vst3.presets", paths, build, refresh=refresh,
-    )
+    key = "vst3.presets"
+    if plugin_scoped:
+        identity = "\n".join(sorted(
+            f"{plugin.get('module', '')}\0{plugin.get('cid', '')}" for plugin in plugins
+        ))
+        key += ".plugin." + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return discovery_cache.cached_discovery(key, paths, build, refresh=refresh)
 
 
 def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str | None:

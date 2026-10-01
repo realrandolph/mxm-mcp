@@ -1466,6 +1466,46 @@ def _client_supports_plugin_elicitation(ctx: Context | None) -> bool:
             or getattr(elicitation, "url", None) is None)
 
 
+def _plugin_query_matches(value: str, query: str) -> bool:
+    query = query.strip().casefold()
+    value = str(value or "").casefold()
+    if not query:
+        return True
+    if query in value:
+        return True
+    normalized_query = "".join(char for char in query if char.isalnum())
+    normalized_value = "".join(char for char in value if char.isalnum())
+    return bool(normalized_query and normalized_query in normalized_value)
+
+
+def _record_matches_plugin_query(record: dict, query: str) -> bool:
+    return any(_plugin_query_matches(record.get(key, ""), query)
+               for key in ("name", "uri", "module", "bundle", "cid"))
+
+
+def _narrow_vst3_bundles(bundles: list[Path], query: str) -> list[Path]:
+    """Use a recognizable bundle name/path to avoid unrelated plugin prompts."""
+    query = query.strip()
+    if not query or vst3_mod.is_valid_cid(query):
+        return bundles
+    requested_path = Path(query).expanduser()
+    if requested_path.suffix.lower() == ".vst3" and requested_path.exists():
+        return [requested_path.resolve()]
+    requested_name = requested_path.name
+    if requested_name.casefold().endswith(".vst3"):
+        requested_name = requested_name[:-5]
+    normalized_query = "".join(char for char in requested_name.casefold()
+                               if char.isalnum())
+    if not normalized_query:
+        return bundles
+    matches = [bundle for bundle in bundles
+               if normalized_query in "".join(
+                   char for char in bundle.stem.casefold() if char.isalnum())]
+    # Keep the old name-to-factory resolution path when bundle naming gives no
+    # safe candidate; common exact product/bundle names take the fast path.
+    return matches or bundles
+
+
 async def _authorized_vst3_plugins(
     ctx: Context | None,
     action: str,
@@ -1473,9 +1513,11 @@ async def _authorized_vst3_plugins(
     *,
     refresh: bool = False,
     bundles: list[Path] | None = None,
+    plugin_query: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Probe only binaries with a matching cached result or explicit consent."""
     bundles = vst3_mod.find_vst3_bundles() if bundles is None else bundles
+    bundles = _narrow_vst3_bundles(bundles, plugin_query)
     approved: dict[str, plugin_permissions.PluginIdentity] = {}
     denied: list[dict] = []
     can_elicit = _client_supports_plugin_elicitation(ctx)
@@ -1835,9 +1877,16 @@ async def list_plugin_presets(
             }
             plugins, denied_plugins = await _authorized_vst3_plugins(
                 ctx, "list_plugin_presets", call_args, refresh=refresh,
+                plugin_query=plugin if plugin_type in {"all", "vst3"} else "",
             )
-            all_presets.extend(vst3_presets.discover_vst3_presets(
-                plugins, refresh=refresh)["presets"])
+            scoped_plugins = ([record for record in plugins
+                               if _record_matches_plugin_query(record, plugin)]
+                              if plugin else plugins)
+            if not plugin or scoped_plugins:
+                all_presets.extend(vst3_presets.discover_vst3_presets(
+                    scoped_plugins, refresh=refresh,
+                    plugin_scoped=bool(plugin),
+                )["presets"])
         if plugin_type in {"all", "lv2"}:
             lv2_index = lv2_mod.discover_lv2(refresh=refresh)
             plugin_by_uri = {item["uri"]: item for item in lv2_index["plugins"]}
@@ -1852,9 +1901,8 @@ async def list_plugin_presets(
         return json.dumps({"error": f"Preset discovery failed: {exc}"})
 
     if plugin:
-        needle = plugin.casefold()
         all_presets = [item for item in all_presets if any(
-            needle in str(item.get(key) or "").casefold()
+            _plugin_query_matches(item.get(key, ""), plugin)
             for key in ("plugin_name", "plugin_uri", "plugin_module", "plugin_cid"))]
 
     def contains(item: dict, key: str, needle: str) -> bool:
