@@ -11,10 +11,13 @@ from xml.etree import ElementTree as ET
 
 from mcp.server import MCPServer
 
+from . import discovery_cache
 from . import effects as effects_mod
 from . import lmms_app
+from . import lv2 as lv2_mod
 from . import presets as zyn_presets
 from . import vst3 as vst3_mod
+from . import vst3_presets
 from . import xml_parser
 from .models import (
     NOTE_NAMES,
@@ -111,12 +114,16 @@ Custom plugins: The user may have installed additional MXM plugins or
  VSTs. Check list_available_plugins for dynamically detected custom
  plugins. Surge XT uses MXM's native LV2 instrument host.
 
-Native VST3: MXM hosts VST3 instruments natively (plugin
- "vst3instrument"). Use list_vst3_instruments to discover installed
- instruments, then add_vst3_instrument_track with the returned module
- path and class id. This is separate from Carla; do not route VST3
- through Carla. Legacy VST2 .dll files remain available through
- scan_vst_directory and add_vst_track.
+Native VST3/LV2 discovery is filesystem-only and headless. Use
+list_native_plugins / inspect_native_plugin to enumerate or inspect installed
+plugins, list_plugin_presets to search installed factory/user banks, and
+refresh_native_plugin_discovery after installing plugins. Native VST3
+instruments use list_vst3_instruments + add_vst3_instrument_track; discovered
+LV2 instruments use add_lv2_instrument_track. Discovered VST3 component state
+and LV2 control-port presets can be applied with load_native_plugin_preset.
+This does not launch MXM or route through Carla.
+Legacy VST2 .dll files remain available through scan_vst_directory and
+add_vst_track.
 
 ZynAddSubFX: For rich sounds, add a track with instrument "zynaddsubfx",
 then load one of ~950 factory presets via load_zyn_preset (browse with
@@ -1438,7 +1445,7 @@ def add_talking_bass_track(
 
 
 @mcp.tool()
-def list_vst3_instruments(include_effects: bool = False) -> str:
+def list_vst3_instruments(include_effects: bool = False, refresh: bool = False) -> str:
     """List native VST3 plugins for MXM's built-in VST3 host (not Carla).
 
     Reads each module's real class id from the locations MXM scans
@@ -1448,9 +1455,10 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
 
     Args:
         include_effects: Also list VST3 effects (default: instruments only)
+        refresh: Invalidate cached discovery and rescan plugin bundles
     """
     try:
-        plugins = vst3_mod.discover_vst3_plugins()
+        plugins = vst3_mod.discover_vst3_plugins(refresh=refresh)
     except Exception as exc:  # pragma: no cover - discovery is defensive
         return json.dumps({"error": f"VST3 discovery failed: {exc}"})
     instruments = [p for p in plugins if p["is_instrument"]]
@@ -1469,6 +1477,312 @@ def list_vst3_instruments(include_effects: bool = False) -> str:
                               "this platform; pass module_path + cid with "
                               "allow_unverified.")
     return json.dumps(payload, indent=2)
+
+
+def _native_plugin_records(plugin_type: str, refresh: bool = False) -> tuple[list[dict], list[str]]:
+    plugin_type = plugin_type.strip().lower()
+    if plugin_type not in {"all", "vst3", "lv2"}:
+        raise ValueError("plugin_type must be 'all', 'vst3', or 'lv2'")
+    plugins: list[dict] = []
+    search_paths: list[str] = []
+    if plugin_type in {"all", "vst3"}:
+        plugins.extend({**item, "plugin_type": "VST3", "uri": None,
+                        "bundle": item["module"]}
+                       for item in vst3_mod.discover_vst3_plugins(refresh=refresh))
+        search_paths.extend(vst3_mod.effective_search_paths())
+    if plugin_type in {"all", "lv2"}:
+        index = lv2_mod.discover_lv2(refresh=refresh)
+        plugins.extend(index["plugins"])
+        search_paths.extend(index["search_paths"])
+    return plugins, list(dict.fromkeys(search_paths))
+
+
+def _resolve_native_plugin(plugin_type: str, plugin: str, refresh: bool = False):
+    plugin_type = plugin_type.strip().lower()
+    if plugin_type == "vst3":
+        records = vst3_mod.discover_vst3_plugins(refresh=refresh)
+        if plugin and (Path(plugin).suffix.lower() == ".vst3" or vst3_mod.is_valid_cid(plugin)):
+            exact = [item for item in records if
+                     item.get("module") == plugin or item.get("cid", "").casefold() == plugin.casefold()]
+            if len(exact) == 1:
+                return exact[0], [], records
+            if exact:
+                return None, exact, records
+        resolved, candidates = vst3_mod.resolve_vst3_instrument(records, plugin_name=plugin)
+        return resolved, candidates, records
+    if plugin_type == "lv2":
+        records = lv2_mod.discover_lv2(refresh=refresh)["plugins"]
+        resolved, candidates = lv2_mod.resolve_plugin(records, plugin)
+        return resolved, candidates, records
+    raise ValueError("plugin_type must be 'vst3' or 'lv2'")
+
+
+@mcp.tool()
+def list_native_plugins(
+    plugin_type: str = "all",
+    include_effects: bool = True,
+    refresh: bool = False,
+) -> str:
+    """Enumerate installed native VST3 and LV2 plugins using filesystem metadata.
+
+    Args:
+        plugin_type: ``all``, ``vst3`` or ``lv2``
+        include_effects: Include effect plugins as well as instruments
+        refresh: Rescan after plugin installation or update
+    """
+    try:
+        plugins, paths = _native_plugin_records(plugin_type, refresh)
+    except Exception as exc:
+        return json.dumps({"error": f"Native plugin discovery failed: {exc}"})
+    if not include_effects:
+        plugins = [plugin for plugin in plugins if plugin.get("is_instrument")]
+    plugins.sort(key=lambda item: (item.get("plugin_type", "").casefold(),
+                                   item.get("name", "").casefold(),
+                                   item.get("uri") or item.get("module", "")))
+    return json.dumps({"count": len(plugins), "plugin_type": plugin_type.lower(),
+                       "search_paths": paths, "plugins": plugins}, indent=2)
+
+
+@mcp.tool()
+def inspect_native_plugin(plugin_type: str, plugin: str, refresh: bool = False) -> str:
+    """Inspect an installed native VST3 or LV2 plugin.
+
+    Args:
+        plugin_type: ``vst3`` or ``lv2``
+        plugin: Name, LV2 URI, VST3 module path or VST3 class CID
+        refresh: Force a filesystem rescan
+    """
+    try:
+        record, candidates, all_records = _resolve_native_plugin(plugin_type, plugin, refresh)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+    if record is None:
+        return json.dumps({"error": f"No unique {plugin_type.upper()} plugin matches {plugin!r}.",
+                           "matches": candidates,
+                           "available": [item for item in all_records
+                                         if item.get("is_instrument")]})
+    return json.dumps(record, indent=2)
+
+
+@mcp.tool()
+def list_plugin_presets(
+    plugin_type: str = "all",
+    plugin: str = "",
+    query: str = "",
+    bank: str = "",
+    category: str = "",
+    tags: str = "",
+    author: str = "",
+    character: str = "",
+    origin: str = "",
+    offset: int = 0,
+    limit: int = 200,
+    refresh: bool = False,
+) -> str:
+    """Search installed VST3 and RDF-declared LV2 presets, including factory banks.
+
+    Args:
+        plugin_type: ``all``, ``vst3`` or ``lv2``
+        plugin: Optional plugin name, LV2 URI, VST3 module path or class CID
+        query: Case-insensitive preset-name search
+        bank: Filter by bank
+        category: Filter by category
+        tags: Filter by tag/feature text
+        author: Filter by author
+        character: Filter by character/features text
+        origin: Filter by ``factory``, ``user`` or ``unknown``
+        offset: Result offset for pagination
+        limit: Maximum results (1-1000)
+        refresh: Force a filesystem rescan
+    """
+    plugin_type = plugin_type.strip().lower()
+    if plugin_type not in {"all", "vst3", "lv2"}:
+        return json.dumps({"error": "plugin_type must be 'all', 'vst3', or 'lv2'"})
+    try:
+        offset = max(0, int(offset))
+        limit = min(1000, max(1, int(limit)))
+        all_presets: list[dict] = []
+        if plugin_type in {"all", "vst3"}:
+            plugins = vst3_mod.discover_vst3_plugins(refresh=refresh)
+            all_presets.extend(vst3_presets.discover_vst3_presets(
+                plugins, refresh=refresh)["presets"])
+        if plugin_type in {"all", "lv2"}:
+            lv2_index = lv2_mod.discover_lv2(refresh=refresh)
+            plugin_by_uri = {item["uri"]: item for item in lv2_index["plugins"]}
+            for item in lv2_index["presets"]:
+                plugin_record = plugin_by_uri.get(item["plugin_uri"], {})
+                all_presets.append({**item,
+                                    "plugin_name": plugin_record.get("name"),
+                                    "plugin_vendor": plugin_record.get("vendor")})
+    except Exception as exc:
+        return json.dumps({"error": f"Preset discovery failed: {exc}"})
+
+    if plugin:
+        needle = plugin.casefold()
+        all_presets = [item for item in all_presets if any(
+            needle in str(item.get(key) or "").casefold()
+            for key in ("plugin_name", "plugin_uri", "plugin_module", "plugin_cid"))]
+
+    def contains(item: dict, key: str, needle: str) -> bool:
+        return not needle or needle.casefold() in str(item.get(key) or "").casefold()
+
+    all_presets = [item for item in all_presets
+                   if contains(item, "name", query)
+                   and contains(item, "bank", bank)
+                   and contains(item, "category", category)
+                   and contains(item, "author", author)
+                   and contains(item, "character", character)
+                   and contains(item, "origin", origin)
+                   and (not tags or any(tags.casefold() in str(value).casefold()
+                                        for value in item.get("tags", [])))]
+    all_presets.sort(key=lambda item: (str(item.get("plugin_name") or "").casefold(),
+                                       str(item.get("name") or "").casefold(),
+                                       str(item.get("source") or "").casefold()))
+    total = len(all_presets)
+    selected = all_presets[offset:offset + limit]
+    # Opaque plugin state is internal to preset application, not a listing field.
+    public_records = [{key: value for key, value in item.items() if key != "state"}
+                      for item in selected]
+    return json.dumps({"count": len(public_records), "total": total,
+                       "offset": offset, "limit": limit,
+                       "next_offset": offset + len(public_records) if offset + len(public_records) < total else None,
+                       "presets": public_records}, indent=2)
+
+
+@mcp.tool()
+def load_native_plugin_preset(track_index: int, preset: str) -> str:
+    """Apply an indexed native plugin preset and embed supported state in the MMP.
+
+    ``preset`` is the preset ``id``/``source`` returned by list_plugin_presets.
+    VST3 component chunks and LV2 control-port RDF values are copied into the
+    project; unsupported opaque preset formats are reported without mutation.
+    """
+    project = get_project()
+    try:
+        track = xml_parser.find_track_element(project.root, track_index)
+        instrument = track.find("instrumenttrack/instrument")
+        if instrument is None:
+            raise ValueError("Track has no instrument")
+        if instrument.get("name") == xml_parser.NATIVE_VST3_HOST:
+            kind = "vst3"
+            wrapper = instrument.find("vst3instrument")
+            key = wrapper.find("key") if wrapper is not None else None
+            attrs = {attr.get("name"): attr.get("value") for attr in
+                     (key.findall("attribute") if key is not None else [])}
+            module, cid = attrs.get("module", ""), attrs.get("cid", "")
+            plugin_records = vst3_mod.discover_vst3_plugins()
+            indexed = vst3_presets.discover_vst3_presets(plugin_records)["presets"]
+            requested = Path(preset).expanduser()
+            requested_source = str(requested.resolve()) if requested.exists() else preset
+            selected = next((item for item in indexed
+                             if item.get("id") == preset or item.get("source") == requested_source), None)
+            if selected is None or not vst3_presets.preset_matches_plugin(
+                    selected, module=module, cid=cid):
+                raise ValueError("Preset is not indexed for this VST3 plugin")
+            if not selected.get("loadable") or not selected.get("state"):
+                raise ValueError("This preset format has no supported embedded VST3 component state")
+            xml_parser.configure_native_vst3_instrument(
+                track, module, cid, state=selected["state"])
+            result = {"host": kind, "preset": selected["name"],
+                      "preset_source": selected["source"], "embedded": True}
+        elif instrument.get("name") == "lv2instrument":
+            kind = "lv2"
+            controls = instrument.find("lv2controls")
+            key = controls.find("key") if controls is not None else None
+            attrs = {attr.get("name"): attr.get("value") for attr in
+                     (key.findall("attribute") if key is not None else [])}
+            uri = attrs.get("uri", "")
+            index = lv2_mod.discover_lv2()
+            requested_path = Path(preset).expanduser()
+            requested_source = str(requested_path.resolve()) if requested_path.exists() else preset
+            selected = next((item for item in index["presets"]
+                             if item.get("id") == preset or item.get("source") == requested_source), None)
+            if selected is None or selected.get("plugin_uri") != uri:
+                raise ValueError("Preset is not indexed for this LV2 plugin")
+            if not selected.get("loadable"):
+                raise ValueError("This LV2 preset has no supported control-port state")
+            xml_parser.configure_native_lv2_instrument(
+                track, uri, port_values=selected["port_values"])
+            result = {"host": kind, "preset": selected["name"],
+                      "preset_source": selected["source"],
+                      "embedded": True, "ports": len(selected["port_values"])}
+        else:
+            raise ValueError("Track must use the native VST3 or LV2 instrument host")
+        project._modified = True
+        result["track_index"] = track_index
+        result["message"] = "Preset state embedded in the project; the preset file is no longer required"
+        return json.dumps(result)
+    except (ValueError, OSError, IndexError) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+def refresh_native_plugin_discovery() -> str:
+    """Clear native plugin/preset indexes and rescan configured filesystem paths."""
+    discovery_cache.clear_discovery_cache()
+    try:
+        plugins, paths = _native_plugin_records("all", refresh=True)
+        vst3_index = vst3_presets.discover_vst3_presets(
+            [item for item in plugins if item.get("plugin_type") == "VST3"], refresh=True)
+        lv2_index = lv2_mod.discover_lv2(refresh=True)
+    except Exception as exc:
+        return json.dumps({"error": f"Native plugin rescan failed: {exc}"})
+    return json.dumps({"plugins": len(plugins),
+                       "vst3_presets": len(vst3_index["presets"]),
+                       "lv2_presets": len(lv2_index["presets"]),
+                       "search_paths": paths,
+                       "message": "Native plugin and preset indexes refreshed"}, indent=2)
+
+
+@mcp.tool()
+def add_lv2_instrument_track(
+    name: str,
+    plugin: str,
+    mixer_channel: int = 0,
+    volume: int = 100,
+    panning: int = 0,
+) -> str:
+    """Add a discovered LV2 instrument using MXM's native LV2 instrument host.
+
+    Args:
+        name: Track name
+        plugin: Installed LV2 plugin name or URI from list_native_plugins
+        mixer_channel: Mixer channel (0=Master)
+        volume: Track volume (0-200)
+        panning: Track panning (-100 to +100)
+    """
+    project = get_project()
+    try:
+        descriptor, candidates, available = _resolve_native_plugin("lv2", plugin)
+    except Exception as exc:
+        return json.dumps({"error": f"LV2 discovery failed: {exc}"})
+    if descriptor is None:
+        return json.dumps({
+            "error": f"No unique installed LV2 plugin matches {plugin!r}.",
+            "matches": candidates,
+            "available": [item for item in available if item.get("is_instrument")],
+        })
+    if not descriptor.get("is_instrument"):
+        return json.dumps({"error": f"LV2 plugin {descriptor['name']!r} is not an instrument."})
+
+    was_modified = project._modified
+    result = project.add_track(
+        "instrument", name, instrument="lv2instrument", mixer_channel=mixer_channel,
+        volume=volume, panning=panning,
+    )
+    index = result["track_index"]
+    try:
+        xml_parser.configure_native_lv2_instrument(
+            xml_parser.find_track_element(project.root, index), descriptor["uri"])
+    except Exception as exc:
+        project.remove_track(index)
+        project._modified = was_modified
+        return json.dumps({"error": str(exc)})
+    project._modified = True
+    result.update({"host": "lv2instrument", "plugin_type": "LV2",
+                   "plugin": descriptor["bundle"], "plugin_id": descriptor["uri"],
+                   "plugin_name": descriptor["name"], "vendor": descriptor.get("vendor")})
+    return json.dumps(result)
 
 
 @mcp.tool()

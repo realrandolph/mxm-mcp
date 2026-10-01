@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=2.0.0",
+    "rdflib>=7.0,<8",
 ]
 
 [project.optional-dependencies]

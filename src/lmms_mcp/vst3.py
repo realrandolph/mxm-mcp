@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import discovery_cache
 from . import lmms_app
 from . import vst3_platform as plat
 
@@ -65,14 +66,19 @@ def effective_search_paths() -> list[str]:
     return paths + _vst3_path_entries(os.environ.get("VST3_PATH", ""))
 
 
-def _collect(directory, result, seen, dirs_only=False):
+def _collect(directory, result, seen, dirs_only=False, visited=None):
     """Recursively collect ``.vst3`` entries (case-sensitive, like MXM).
 
     ``dirs_only`` mirrors MXM's ``QDir::Dirs`` scan for ``VST3_PATH``; the
     standard locations use MXM's extension-based ``findFilesWithExt`` instead.
     A ``.vst3`` entry is never descended into.
     """
+    visited = set() if visited is None else visited
     try:
+        real_path = os.path.realpath(directory)
+        if real_path in visited:
+            return
+        visited.add(real_path)
         entries = sorted(directory.iterdir())
     except OSError:
         return
@@ -83,7 +89,7 @@ def _collect(directory, result, seen, dirs_only=False):
                 seen.add(key)
                 result.append(entry)
         elif entry.is_dir():
-            _collect(entry, result, seen, dirs_only)
+            _collect(entry, result, seen, dirs_only, visited)
 
 
 def _add_bundles_from_path(path, result, seen):
@@ -139,7 +145,8 @@ def _probe_bundle(bundle: Path) -> dict:
 
 def discover_vst3_plugins(
     bundles: list[Path] | None = None,
-    probe=_probe_bundle,
+    probe=None,
+    refresh: bool = False,
 ) -> list[dict]:
     """Discover the VST3 audio module classes MXM can host.
 
@@ -150,8 +157,20 @@ def discover_vst3_plugins(
     """
     if not native_vst3_discovery_supported():
         return []
+    probe = probe or _probe_bundle
+    if bundles is None and probe is _probe_bundle:
+        paths = effective_search_paths()
+        return discovery_cache.cached_discovery(
+            "vst3.plugins", paths,
+            lambda: _discover_vst3_plugins(find_vst3_bundles(), probe),
+            refresh=refresh,
+        )
     if bundles is None:
         bundles = find_vst3_bundles()
+    return _discover_vst3_plugins(bundles, probe)
+
+
+def _discover_vst3_plugins(bundles: list[Path], probe) -> list[dict]:
     plugins: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for bundle in bundles:
