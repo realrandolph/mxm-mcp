@@ -7,16 +7,21 @@ manipulating LMMS projects programmatically via the Model Context Protocol.
 import json
 import os
 from pathlib import Path
+from typing import Literal
 from xml.etree import ElementTree as ET
 
+from pydantic import BaseModel
 from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
 
 from . import discovery_cache
 from . import effects as effects_mod
 from . import lmms_app
 from . import lv2 as lv2_mod
+from . import plugin_permissions
 from . import presets as zyn_presets
 from . import vst3 as vst3_mod
+from . import vst3_probe
 from . import vst3_presets
 from . import xml_parser
 from .models import (
@@ -114,10 +119,12 @@ Custom plugins: The user may have installed additional MXM plugins or
  VSTs. Check list_available_plugins for dynamically detected custom
  plugins. Surge XT uses MXM's native LV2 instrument host.
 
-Native VST3/LV2 discovery is filesystem-only and headless. Use
+Native VST3/LV2 discovery is filesystem-based and headless. VST3 factory
+probing executes plugin code and requires per-binary user consent first. Use
 list_native_plugins / inspect_native_plugin to enumerate or inspect installed
 plugins, list_plugin_presets to search installed factory/user banks, and
-refresh_native_plugin_discovery after installing plugins. Native VST3
+refresh_native_plugin_discovery after installing plugins. If a tool returns a
+plugin permission token, ask the user before resolving it. Native VST3
 instruments use list_vst3_instruments + add_vst3_instrument_track; discovered
 LV2 instruments use add_lv2_instrument_track. Discovered VST3 component state
 and LV2 control-port presets can be applied with load_native_plugin_preset.
@@ -1444,8 +1451,178 @@ def add_talking_bass_track(
     return json.dumps(result)
 
 
+class _PluginPermissionChoice(BaseModel):
+    decision: Literal["Allow once", "Always allow this binary", "Deny"]
+
+
+def _client_supports_plugin_elicitation(ctx: Context | None) -> bool:
+    capabilities = ctx.client_capabilities if ctx is not None else None
+    elicitation = getattr(capabilities, "elicitation", None)
+    if elicitation is None:
+        return False
+    # An empty elicitation capability means form mode in the MCP spec; a
+    # url-only declaration does not support the form we need for these choices.
+    return (getattr(elicitation, "form", None) is not None
+            or getattr(elicitation, "url", None) is None)
+
+
+async def _authorized_vst3_plugins(
+    ctx: Context | None,
+    action: str,
+    arguments: dict,
+    *,
+    refresh: bool = False,
+    bundles: list[Path] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Probe only binaries with a matching cached result or explicit consent."""
+    bundles = vst3_mod.find_vst3_bundles() if bundles is None else bundles
+    approved: dict[str, plugin_permissions.PluginIdentity] = {}
+    denied: list[dict] = []
+    can_elicit = _client_supports_plugin_elicitation(ctx)
+
+    for bundle in bundles:
+        try:
+            binary = vst3_probe.bundle_binary(bundle)
+            if binary is None:
+                denied.append({"module": str(bundle), "reason": "no loadable module binary"})
+                continue
+            identity = plugin_permissions.identify_plugin(bundle, binary)
+        except (OSError, RuntimeError, ValueError) as exc:
+            denied.append({"module": str(bundle), "reason": f"identity unavailable: {exc}"})
+            continue
+
+        override = plugin_permissions.current_override(identity)
+        stored = plugin_permissions.stored_decision(identity) if override is None else None
+        decision = override or stored
+        if decision == "deny":
+            denied.append({"module": identity.module, "reason": "user denied this plugin"})
+            continue
+        if plugin_permissions.cached_probe(identity) is not None:
+            approved[identity.module] = identity
+            continue
+        if decision is None:
+            if can_elicit:
+                message = (
+                    "VST3 metadata probing will execute this plugin binary with the MCP "
+                    "server user's permissions (including its normal filesystem and network "
+                    "access). This is not sandboxed. Choose Allow once, Always allow this "
+                    "binary, or Deny.\nBundle: "
+                    f"{identity.module!r}\nBinary: {identity.binary!r}\n"
+                    f"SHA-256: {identity.sha256}"
+                )
+                try:
+                    response = await ctx.elicit(message, _PluginPermissionChoice)
+                except Exception as exc:
+                    denied.append({"module": identity.module,
+                                   "reason": f"permission prompt failed: {type(exc).__name__}"})
+                    continue
+                if response.action != "accept" or response.data is None:
+                    denied.append({"module": identity.module, "reason": "user declined or cancelled"})
+                    continue
+                decision = {
+                    "Allow once": "allow_once",
+                    "Always allow this binary": "always_allow",
+                    "Deny": "deny",
+                }[response.data.decision]
+            else:
+                if ctx is None:
+                    denied.append({"module": identity.module,
+                                   "reason": "permission context unavailable; plugin not executed"})
+                    continue
+                token = plugin_permissions.create_pending(action, arguments, identity)
+                raise plugin_permissions.PendingAccessError(token, identity)
+
+        if decision == "deny":
+            if override is None and stored is None:
+                plugin_permissions.remember_decision(identity, "deny")
+            denied.append({"module": identity.module, "reason": "user denied this plugin"})
+            continue
+        if decision == "always_allow":
+            if override is None and stored is None:
+                plugin_permissions.remember_decision(identity, "always_allow")
+        approved[identity.module] = identity
+
+    def probe(bundle: Path) -> dict:
+        module = str(Path(bundle).resolve())
+        expected = approved.get(module)
+        if expected is None:
+            return {"module": module, "error": "plugin has no consent for this probe"}
+        try:
+            binary = vst3_probe.bundle_binary(bundle)
+            if binary is None:
+                return {"module": module, "error": "plugin binary disappeared after consent"}
+            current = plugin_permissions.identify_plugin(bundle, binary)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {"module": module, "error": f"plugin identity changed after consent: {exc}"}
+        if current.key != expected.key:
+            return {"module": module, "error": "plugin binary changed after consent; retry discovery"}
+        cached = plugin_permissions.cached_probe(current)
+        if cached is not None:
+            return cached
+        result = vst3_mod._probe_bundle(bundle)
+        try:
+            after = plugin_permissions.identify_plugin(bundle, binary)
+        except (OSError, RuntimeError, ValueError):
+            return {"module": module, "error": "plugin binary changed while it was being probed"}
+        if after.key != expected.key:
+            return {"module": module, "error": "plugin binary changed while it was being probed"}
+        plugin_permissions.cache_probe(expected, result)
+        return result
+
+    allowed_bundles = [Path(module) for module in approved]
+    plugins = vst3_mod.discover_vst3_plugins(
+        bundles=allowed_bundles, probe=probe, refresh=refresh,
+    )
+    return plugins, denied
+
+
+def _permission_pending_result(exc: plugin_permissions.PendingAccessError) -> str:
+    return json.dumps(exc.response(), indent=2)
+
+
 @mcp.tool()
-def list_vst3_instruments(include_effects: bool = False, refresh: bool = False) -> str:
+async def resolve_native_plugin_access(
+    token: str,
+    decision: Literal["allow_once", "always_allow", "deny"],
+    ctx: Context,
+) -> str:
+    """Resolve a pending plugin permission and resume its frozen MCP action.
+
+    Call only after explicitly asking the user. The pending action and arguments
+    are stored server-side and cannot be changed during resumption.
+    """
+    pending = plugin_permissions.take_pending(token)
+    if pending is None:
+        return json.dumps({"error": "Permission token is invalid, expired, or already used"})
+    try:
+        current = plugin_permissions.identify_plugin(
+            pending.plugin.module, pending.plugin.binary,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return json.dumps({"error": f"Plugin changed or disappeared before approval: {exc}"})
+    if current.key != pending.plugin.key:
+        return json.dumps({"error": "Plugin binary changed while approval was pending; request consent again"})
+
+    if decision in {"always_allow", "deny"}:
+        plugin_permissions.remember_decision(current, decision)
+    try:
+        with plugin_permissions.decision_override(current, decision):
+            result = await ctx.mcp_server.call_tool(
+                pending.action, pending.arguments, ctx, convert_result=False,
+            )
+    except Exception as exc:
+        return json.dumps({"error": f"Could not resume {pending.action}: {exc}"})
+    if isinstance(result, str):
+        return result
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+async def list_vst3_instruments(
+    include_effects: bool = False,
+    refresh: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """List native VST3 plugins for MXM's built-in VST3 host (not Carla).
 
     Reads each module's real class id from the locations MXM scans
@@ -1458,7 +1635,12 @@ def list_vst3_instruments(include_effects: bool = False, refresh: bool = False) 
         refresh: Invalidate cached discovery and rescan plugin bundles
     """
     try:
-        plugins = vst3_mod.discover_vst3_plugins(refresh=refresh)
+        plugins, denied = await _authorized_vst3_plugins(
+            ctx, "list_vst3_instruments",
+            {"include_effects": include_effects, "refresh": refresh}, refresh=refresh,
+        )
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except Exception as exc:  # pragma: no cover - discovery is defensive
         return json.dumps({"error": f"VST3 discovery failed: {exc}"})
     instruments = [p for p in plugins if p["is_instrument"]]
@@ -1471,6 +1653,7 @@ def list_vst3_instruments(include_effects: bool = False, refresh: bool = False) 
         "instrument_count": len(instruments),
         "effect_count": len(plugins) - len(instruments),
         "plugins": plugins if include_effects else instruments,
+        "denied_plugins": denied,
     }
     if not payload["discovery_supported"]:
         payload["warning"] = ("This MCP cannot discover native VST3 plugins on "
@@ -1479,49 +1662,70 @@ def list_vst3_instruments(include_effects: bool = False, refresh: bool = False) 
     return json.dumps(payload, indent=2)
 
 
-def _native_plugin_records(plugin_type: str, refresh: bool = False) -> tuple[list[dict], list[str]]:
+async def _native_plugin_records(
+    plugin_type: str,
+    refresh: bool,
+    ctx: Context | None,
+    action: str,
+    arguments: dict,
+) -> tuple[list[dict], list[str], list[dict]]:
     plugin_type = plugin_type.strip().lower()
     if plugin_type not in {"all", "vst3", "lv2"}:
         raise ValueError("plugin_type must be 'all', 'vst3', or 'lv2'")
     plugins: list[dict] = []
     search_paths: list[str] = []
+    denied: list[dict] = []
     if plugin_type in {"all", "vst3"}:
+        vst3_plugins, denied = await _authorized_vst3_plugins(
+            ctx, action, arguments, refresh=refresh,
+        )
         plugins.extend({**item, "plugin_type": "VST3", "uri": None,
-                        "bundle": item["module"]}
-                       for item in vst3_mod.discover_vst3_plugins(refresh=refresh))
+                        "bundle": item["module"]} for item in vst3_plugins)
         search_paths.extend(vst3_mod.effective_search_paths())
     if plugin_type in {"all", "lv2"}:
         index = lv2_mod.discover_lv2(refresh=refresh)
         plugins.extend(index["plugins"])
         search_paths.extend(index["search_paths"])
-    return plugins, list(dict.fromkeys(search_paths))
+    return plugins, list(dict.fromkeys(search_paths)), denied
 
 
-def _resolve_native_plugin(plugin_type: str, plugin: str, refresh: bool = False):
+async def _resolve_native_plugin(
+    plugin_type: str,
+    plugin: str,
+    refresh: bool,
+    ctx: Context | None,
+    action: str,
+    arguments: dict,
+):
     plugin_type = plugin_type.strip().lower()
     if plugin_type == "vst3":
-        records = vst3_mod.discover_vst3_plugins(refresh=refresh)
+        records, denied = await _authorized_vst3_plugins(
+            ctx, action, arguments, refresh=refresh,
+        )
+        if denied and Path(plugin).suffix.lower() != ".vst3":
+            return None, [], records, denied
         if plugin and (Path(plugin).suffix.lower() == ".vst3" or vst3_mod.is_valid_cid(plugin)):
             exact = [item for item in records if
                      item.get("module") == plugin or item.get("cid", "").casefold() == plugin.casefold()]
             if len(exact) == 1:
-                return exact[0], [], records
+                return exact[0], [], records, denied
             if exact:
-                return None, exact, records
+                return None, exact, records, denied
         resolved, candidates = vst3_mod.resolve_vst3_instrument(records, plugin_name=plugin)
-        return resolved, candidates, records
+        return resolved, candidates, records, denied
     if plugin_type == "lv2":
         records = lv2_mod.discover_lv2(refresh=refresh)["plugins"]
         resolved, candidates = lv2_mod.resolve_plugin(records, plugin)
-        return resolved, candidates, records
+        return resolved, candidates, records, []
     raise ValueError("plugin_type must be 'vst3' or 'lv2'")
 
 
 @mcp.tool()
-def list_native_plugins(
+async def list_native_plugins(
     plugin_type: str = "all",
     include_effects: bool = True,
     refresh: bool = False,
+    ctx: Context | None = None,
 ) -> str:
     """Enumerate installed native VST3 and LV2 plugins using filesystem metadata.
 
@@ -1531,7 +1735,13 @@ def list_native_plugins(
         refresh: Rescan after plugin installation or update
     """
     try:
-        plugins, paths = _native_plugin_records(plugin_type, refresh)
+        call_args = {"plugin_type": plugin_type, "include_effects": include_effects,
+                     "refresh": refresh}
+        plugins, paths, denied = await _native_plugin_records(
+            plugin_type, refresh, ctx, "list_native_plugins", call_args,
+        )
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except Exception as exc:
         return json.dumps({"error": f"Native plugin discovery failed: {exc}"})
     if not include_effects:
@@ -1540,11 +1750,17 @@ def list_native_plugins(
                                    item.get("name", "").casefold(),
                                    item.get("uri") or item.get("module", "")))
     return json.dumps({"count": len(plugins), "plugin_type": plugin_type.lower(),
-                       "search_paths": paths, "plugins": plugins}, indent=2)
+                       "search_paths": paths, "plugins": plugins,
+                       "denied_plugins": denied}, indent=2)
 
 
 @mcp.tool()
-def inspect_native_plugin(plugin_type: str, plugin: str, refresh: bool = False) -> str:
+async def inspect_native_plugin(
+    plugin_type: str,
+    plugin: str,
+    refresh: bool = False,
+    ctx: Context | None = None,
+) -> str:
     """Inspect an installed native VST3 or LV2 plugin.
 
     Args:
@@ -1553,19 +1769,25 @@ def inspect_native_plugin(plugin_type: str, plugin: str, refresh: bool = False) 
         refresh: Force a filesystem rescan
     """
     try:
-        record, candidates, all_records = _resolve_native_plugin(plugin_type, plugin, refresh)
+        call_args = {"plugin_type": plugin_type, "plugin": plugin, "refresh": refresh}
+        record, candidates, all_records, denied = await _resolve_native_plugin(
+            plugin_type, plugin, refresh, ctx, "inspect_native_plugin", call_args,
+        )
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
     if record is None:
         return json.dumps({"error": f"No unique {plugin_type.upper()} plugin matches {plugin!r}.",
                            "matches": candidates,
+                           "denied_plugins": denied,
                            "available": [item for item in all_records
                                          if item.get("is_instrument")]})
-    return json.dumps(record, indent=2)
+    return json.dumps({**record, "denied_plugins": denied}, indent=2)
 
 
 @mcp.tool()
-def list_plugin_presets(
+async def list_plugin_presets(
     plugin_type: str = "all",
     plugin: str = "",
     query: str = "",
@@ -1578,6 +1800,7 @@ def list_plugin_presets(
     offset: int = 0,
     limit: int = 200,
     refresh: bool = False,
+    ctx: Context | None = None,
 ) -> str:
     """Search installed VST3 and RDF-declared LV2 presets, including factory banks.
 
@@ -1602,8 +1825,17 @@ def list_plugin_presets(
         offset = max(0, int(offset))
         limit = min(1000, max(1, int(limit)))
         all_presets: list[dict] = []
+        denied_plugins: list[dict] = []
         if plugin_type in {"all", "vst3"}:
-            plugins = vst3_mod.discover_vst3_plugins(refresh=refresh)
+            call_args = {
+                "plugin_type": plugin_type, "plugin": plugin, "query": query,
+                "bank": bank, "category": category, "tags": tags, "author": author,
+                "character": character, "origin": origin, "offset": offset,
+                "limit": limit, "refresh": refresh,
+            }
+            plugins, denied_plugins = await _authorized_vst3_plugins(
+                ctx, "list_plugin_presets", call_args, refresh=refresh,
+            )
             all_presets.extend(vst3_presets.discover_vst3_presets(
                 plugins, refresh=refresh)["presets"])
         if plugin_type in {"all", "lv2"}:
@@ -1614,6 +1846,8 @@ def list_plugin_presets(
                 all_presets.append({**item,
                                     "plugin_name": plugin_record.get("name"),
                                     "plugin_vendor": plugin_record.get("vendor")})
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except Exception as exc:
         return json.dumps({"error": f"Preset discovery failed: {exc}"})
 
@@ -1645,12 +1879,17 @@ def list_plugin_presets(
                       for item in selected]
     return json.dumps({"count": len(public_records), "total": total,
                        "offset": offset, "limit": limit,
-                       "next_offset": offset + len(public_records) if offset + len(public_records) < total else None,
-                       "presets": public_records}, indent=2)
+                        "next_offset": offset + len(public_records) if offset + len(public_records) < total else None,
+                        "denied_plugins": denied_plugins,
+                        "presets": public_records}, indent=2)
 
 
 @mcp.tool()
-def load_native_plugin_preset(track_index: int, preset: str) -> str:
+async def load_native_plugin_preset(
+    track_index: int,
+    preset: str,
+    ctx: Context | None = None,
+) -> str:
     """Apply an indexed native plugin preset and embed supported state in the MMP.
 
     ``preset`` is the preset ``id``/``source`` returned by list_plugin_presets.
@@ -1670,7 +1909,10 @@ def load_native_plugin_preset(track_index: int, preset: str) -> str:
             attrs = {attr.get("name"): attr.get("value") for attr in
                      (key.findall("attribute") if key is not None else [])}
             module, cid = attrs.get("module", ""), attrs.get("cid", "")
-            plugin_records = vst3_mod.discover_vst3_plugins()
+            call_args = {"track_index": track_index, "preset": preset}
+            plugin_records, _denied = await _authorized_vst3_plugins(
+                ctx, "load_native_plugin_preset", call_args,
+            )
             vst3_index = vst3_presets.discover_vst3_presets(plugin_records)
             indexed = vst3_index["presets"]
             requested = Path(preset).expanduser()
@@ -1719,35 +1961,43 @@ def load_native_plugin_preset(track_index: int, preset: str) -> str:
         result["track_index"] = track_index
         result["message"] = "Preset state embedded in the project; the preset file is no longer required"
         return json.dumps(result)
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except (ValueError, OSError, IndexError) as exc:
         return json.dumps({"error": str(exc)})
 
 
 @mcp.tool()
-def refresh_native_plugin_discovery() -> str:
+async def refresh_native_plugin_discovery(ctx: Context | None = None) -> str:
     """Clear native plugin/preset indexes and rescan configured filesystem paths."""
     discovery_cache.clear_discovery_cache()
     try:
-        plugins, paths = _native_plugin_records("all", refresh=True)
+        plugins, paths, denied = await _native_plugin_records(
+            "all", True, ctx, "refresh_native_plugin_discovery", {},
+        )
         vst3_index = vst3_presets.discover_vst3_presets(
             [item for item in plugins if item.get("plugin_type") == "VST3"], refresh=True)
         lv2_index = lv2_mod.discover_lv2(refresh=True)
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
     except Exception as exc:
         return json.dumps({"error": f"Native plugin rescan failed: {exc}"})
     return json.dumps({"plugins": len(plugins),
                        "vst3_presets": len(vst3_index["presets"]),
-                       "lv2_presets": len(lv2_index["presets"]),
-                       "search_paths": paths,
-                       "message": "Native plugin and preset indexes refreshed"}, indent=2)
+                        "lv2_presets": len(lv2_index["presets"]),
+                        "search_paths": paths,
+                        "denied_plugins": denied,
+                        "message": "Native plugin and preset indexes refreshed"}, indent=2)
 
 
 @mcp.tool()
-def add_lv2_instrument_track(
+async def add_lv2_instrument_track(
     name: str,
     plugin: str,
     mixer_channel: int = 0,
     volume: int = 100,
     panning: int = 0,
+    ctx: Context | None = None,
 ) -> str:
     """Add a discovered LV2 instrument using MXM's native LV2 instrument host.
 
@@ -1760,7 +2010,11 @@ def add_lv2_instrument_track(
     """
     project = get_project()
     try:
-        descriptor, candidates, available = _resolve_native_plugin("lv2", plugin)
+        descriptor, candidates, available, _denied = await _resolve_native_plugin(
+            "lv2", plugin, False, ctx, "add_lv2_instrument_track",
+            {"name": name, "plugin": plugin, "mixer_channel": mixer_channel,
+             "volume": volume, "panning": panning},
+        )
     except Exception as exc:
         return json.dumps({"error": f"LV2 discovery failed: {exc}"})
     if descriptor is None:
@@ -1793,7 +2047,7 @@ def add_lv2_instrument_track(
 
 
 @mcp.tool()
-def add_vst3_instrument_track(
+async def add_vst3_instrument_track(
     name: str,
     plugin: str = "",
     module_path: str = "",
@@ -1803,6 +2057,7 @@ def add_vst3_instrument_track(
     volume: int = 100,
     panning: int = 0,
     allow_unverified: bool = False,
+    ctx: Context | None = None,
 ) -> str:
     """Add an instrument track hosted by MXM's native VST3 host (not Carla).
 
@@ -1829,10 +2084,21 @@ def add_vst3_instrument_track(
             "error": "Provide both module_path and cid, or use plugin instead.",
         })
 
-    def _discover():
+    async def _discover():
         """Run the discovery sweep, returning ``(plugins, error)``."""
         try:
-            return vst3_mod.discover_vst3_plugins(), None
+            call_args = {
+                "name": name, "plugin": plugin, "module_path": module_path, "cid": cid,
+                "state": state, "mixer_channel": mixer_channel, "volume": volume,
+                "panning": panning, "allow_unverified": allow_unverified,
+            }
+            return await _authorized_vst3_plugins(
+                ctx, "add_vst3_instrument_track", call_args,
+                bundles=([Path(module_path.strip()).expanduser()]
+                         if explicit else None),
+            ), None
+        except plugin_permissions.PendingAccessError as exc:
+            return None, exc
         except Exception as exc:  # pragma: no cover - discovery is defensive
             return None, f"VST3 discovery failed: {exc}"
 
@@ -1852,9 +2118,12 @@ def add_vst3_instrument_track(
                 "cid": vst3_mod.normalize_cid(cid),
             }
         else:
-            discovered, error = _discover()
+            discovered, error = await _discover()
+            if isinstance(error, plugin_permissions.PendingAccessError):
+                return _permission_pending_result(error)
             if error:
                 return json.dumps({"error": error})
+            discovered, denied = discovered
             descriptor, _ = vst3_mod.resolve_vst3_instrument(
                 discovered, module=module_path, cid=cid
             )
@@ -1864,11 +2133,20 @@ def add_vst3_instrument_track(
                              f"{module_path!r} and cid {cid!r}.",
                     "hint": "Use list_vst3_instruments, or allow_unverified=True.",
                     "available": discovered,
+                    "denied_plugins": denied,
                 })
     else:
-        discovered, error = _discover()
+        discovered, error = await _discover()
+        if isinstance(error, plugin_permissions.PendingAccessError):
+            return _permission_pending_result(error)
         if error:
             return json.dumps({"error": error})
+        discovered, denied = discovered
+        if denied:
+            return json.dumps({
+                "error": "Cannot safely resolve a VST3 name while one or more plugins were denied.",
+                "denied_plugins": denied,
+            })
         descriptor, candidates = vst3_mod.resolve_vst3_instrument(
             discovered, plugin_name=plugin, instruments_only=True
         )

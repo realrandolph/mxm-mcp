@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -87,6 +88,10 @@ def _vst3_plugin(bundle: Path) -> dict:
             "module": str(bundle), "cid": CID, "is_instrument": True,
             "sub_categories": "Instrument|Synth", "version": "1.0",
             "class_flags": 0}
+
+
+def _run_tool(awaitable):
+    return asyncio.run(awaitable)
 
 
 def _new_project(instrument: str, name: str = "Synth") -> LMMSProject:
@@ -367,21 +372,22 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     state = _write_vstpreset(preset_path)
     plugin = _vst3_plugin(plugin_bundle)
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
+    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
     monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [tmp_path])
     project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
     xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
     server.set_project(project)
-    result = json.loads(server.load_native_plugin_preset(0, str(preset_path)))
+    result = json.loads(_run_tool(server.load_native_plugin_preset(0, str(preset_path))))
     assert result["embedded"] is True
     state_node = project.root.find(".//vst3instrument/state")
     assert base64.b64decode(state_node.text) == state
     assert project.modified
-    listed = json.loads(server.list_plugin_presets("vst3", "Fixture Synth"))
+    listed = json.loads(_run_tool(server.list_plugin_presets("vst3", "Fixture Synth")))
     assert "state" not in listed["presets"][0]
-    filtered = json.loads(server.list_plugin_presets(
+    filtered = json.loads(_run_tool(server.list_plugin_presets(
         "vst3", plugin="Fixture Synth", query="warm", bank="Factory",
         category="pads", tags="soft", author="ada", character="wide",
-        origin="factory"))
+        origin="factory")))
     assert filtered["total"] == 1
     project_path = tmp_path / "vst3-state.mmp"
     project.save(project_path, compressed=False)
@@ -432,13 +438,14 @@ def test_vst3_controller_state_preset_fails_without_mutating_project(tmp_path, m
     _write_vstpreset(preset_path, controller_state=b"controller state")
     plugin = _vst3_plugin(plugin_bundle)
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
+    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
     monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [tmp_path])
     project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
     xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
     project._modified = False
     before = xml_parser.ET.tostring(project.root)
     server.set_project(project)
-    result = json.loads(server.load_native_plugin_preset(0, str(preset_path)))
+    result = json.loads(_run_tool(server.load_native_plugin_preset(0, str(preset_path))))
     assert "controller state" in result["error"]
     assert xml_parser.ET.tostring(project.root) == before
     assert project.modified is False
@@ -452,10 +459,10 @@ def test_lv2_preset_tool_serializes_native_port_values_and_roundtrips(tmp_path, 
     project = LMMSProject()
     project.new()
     server.set_project(project)
-    added = json.loads(server.add_lv2_instrument_track("Fixture", PLUGIN_URI))
+    added = json.loads(_run_tool(server.add_lv2_instrument_track("Fixture", PLUGIN_URI)))
     assert added["plugin_id"] == PLUGIN_URI
     assert added["host"] == "lv2instrument"
-    result = json.loads(server.load_native_plugin_preset(0, str(preset_path)))
+    result = json.loads(_run_tool(server.load_native_plugin_preset(0, str(preset_path))))
     assert result["embedded"] is True
     assert result["ports"] == 1
     models = project.root.find(".//lv2controls/models")
@@ -471,17 +478,18 @@ def test_native_plugin_and_preset_tools_filter_and_refresh(tmp_path, monkeypatch
     _fixture_lv2_bundle(root)
     monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [])
+    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
     monkeypatch.setattr(vst3, "effective_search_paths", lambda: [])
     monkeypatch.setattr(vst3_presets, "preset_search_paths", lambda plugins=None: [])
     monkeypatch.delenv("LV2_PATH", raising=False)
-    plugins = json.loads(server.list_native_plugins("lv2"))
+    plugins = json.loads(_run_tool(server.list_native_plugins("lv2")))
     assert plugins["count"] == 1
     assert plugins["plugins"][0]["uri"] == PLUGIN_URI
-    presets = json.loads(server.list_plugin_presets(
-        "lv2", plugin=PLUGIN_URI, tags="warm", author="ada"))
+    presets = json.loads(_run_tool(server.list_plugin_presets(
+        "lv2", plugin=PLUGIN_URI, tags="warm", author="ada")))
     assert presets["total"] == 1
     assert presets["presets"][0]["name"] == "Warm Pad"
-    refreshed = json.loads(server.refresh_native_plugin_discovery())
+    refreshed = json.loads(_run_tool(server.refresh_native_plugin_discovery()))
     assert refreshed["lv2_presets"] == 1
 
 

@@ -227,13 +227,21 @@ roots. Factory/user origin and optional metadata are reported only when
 available. Refresh after installing or updating plugins/presets; indexes
 otherwise reuse filesystem-identity-checked cached results.
 
-VST3 factory probing loads third-party module code. On Linux systems with
-Landlock support, the probe process is confined to read-only runtime/plugin
-paths and a private writable scratch directory; network and cross-process
-control syscalls are blocked, and CPU, memory, file-size and output are capped.
-That sandbox is not yet implemented for Windows/macOS or Linux kernels without
-Landlock. To avoid breaking normal discovery, those systems retain the existing
-separate-process probe, which is crash isolation only—not a security sandbox.
+VST3 factory probing executes third-party module code in a separate process.
+Before the first probe of each binary, the server requests per-plugin consent
+through MCP form elicitation when the client advertises support. The user can
+allow that probe once, permanently trust that exact binary, or deny it. Permanent
+decisions are stored in the user's local LMMS MCP config directory and are tied
+to the binary's SHA-256; replacing a binary requires a new decision. When a
+client lacks elicitation, the server returns a short-lived one-use token and a
+frozen action; the host should ask the user with its question UI before calling
+`resolve_native_plugin_access`. Denied plugins are skipped. Consent is not a
+sandbox: an approved plugin runs with the MCP server user's normal filesystem
+and network permissions. The trust file is
+`$XDG_CONFIG_HOME/lmms-mcp/native-plugin-permissions.json` (default
+`~/.config/lmms-mcp/native-plugin-permissions.json`) or
+`%APPDATA%/lmms-mcp/native-plugin-permissions.json` on Windows; remove an entry
+there to revoke a permanent decision.
 
 `load_native_plugin_preset` embeds VST3 component chunks or LV2 input-control
 port values into the MMP project. Preset formats without a known compatible

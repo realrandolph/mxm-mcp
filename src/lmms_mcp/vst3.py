@@ -12,15 +12,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from . import discovery_cache
 from . import lmms_app
-from . import vst3_sandbox
 from . import vst3_platform as plat
 from .path_safety import resolved_path_within
 
@@ -176,51 +173,18 @@ def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
 
 
 def _probe_bundle(bundle: Path) -> dict:
-    """Introspect one bundle, using Linux filesystem/syscall confinement when available."""
+    """Introspect one user-approved bundle in a crash-isolated process."""
     try:
-        if not (plat.LINUX and vst3_sandbox.sandbox_available()):
-            # Preserve normal discovery on Windows/macOS and older Linux
-            # kernels; those platforms still have process isolation only.
-            proc = subprocess.run(
-                [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
-                capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
-            )
-            stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
-        else:
-            with tempfile.TemporaryDirectory(prefix="lmms-vst3-probe-") as scratch:
-                env = {key: os.environ[key] for key in
-                       ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "LD_LIBRARY_PATH",
-                        "LD_BIND_NOW") if key in os.environ}
-                env.update({"HOME": scratch, "TMPDIR": scratch, "TMP": scratch,
-                            "TEMP": scratch, "PYTHONDONTWRITEBYTECODE": "1",
-                            "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
-                bundle_path = Path(bundle).resolve(strict=True)
-                allowed_root = bundle_path.parent
-                command = [sys.executable, "-m", "lmms_mcp.vst3_probe",
-                           "--sandbox", scratch, str(allowed_root), str(bundle_path)]
-                with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-                    proc = subprocess.Popen(
-                        command, stdin=subprocess.DEVNULL, stdout=stdout_file,
-                        stderr=stderr_file, cwd=scratch, env=env, start_new_session=True,
-                    )
-                    try:
-                        proc.wait(timeout=_PROBE_TIMEOUT_SECONDS)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        return {"module": str(bundle), "error": "VST3 probe timed out"}
-                    stdout_file.seek(0)
-                    stderr_file.seek(0)
-                    stdout = stdout_file.read(_PROBE_OUTPUT_LIMIT + 1).decode(
-                        "utf-8", "replace")
-                    stderr = stderr_file.read(_PROBE_OUTPUT_LIMIT + 1).decode(
-                        "utf-8", "replace")
-                    if len(stdout.encode("utf-8")) > _PROBE_OUTPUT_LIMIT \
-                            or len(stderr.encode("utf-8")) > _PROBE_OUTPUT_LIMIT:
-                        return {"module": str(bundle), "error": "VST3 probe output limit exceeded"}
-                    returncode = proc.returncode
+        proc = subprocess.run(
+            [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"module": str(bundle), "error": f"{type(exc).__name__}: {exc}"}
+    if len(stdout.encode("utf-8")) > _PROBE_OUTPUT_LIMIT \
+            or len(stderr.encode("utf-8")) > _PROBE_OUTPUT_LIMIT:
+        return {"module": str(bundle), "error": "VST3 probe output limit exceeded"}
     for line in stdout.splitlines():
         try:
             payload = json.loads(line)

@@ -6,6 +6,7 @@ render check lives in ``test_lmms13_integration.py``.
 """
 
 import ctypes
+import asyncio
 import json
 import os
 import platform
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp import vst3, vst3_probe, vst3_sandbox, xml_parser
+from lmms_mcp import vst3, vst3_probe, xml_parser
 from lmms_mcp import vst3_platform as plat
 from lmms_mcp import server as srv
 from lmms_mcp.project import LMMSProject
@@ -387,6 +388,12 @@ class TestVst3Platform:
 class TestVst3ServerTools:
     def _patch(self, monkeypatch, plugins):
         monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda *a, **k: plugins)
+        monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
+        monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: None)
+
+    @staticmethod
+    def _run(awaitable):
+        return asyncio.run(awaitable)
 
     def _new_project(self):
         project = LMMSProject()
@@ -397,18 +404,18 @@ class TestVst3ServerTools:
     def test_list_instruments_and_effects(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT"),
                                   _descriptor(name="ZamComp", sub_categories="Fx|Dynamics")])
-        payload = json.loads(srv.list_vst3_instruments())
+        payload = json.loads(self._run(srv.list_vst3_instruments()))
         assert payload["host"] == "vst3instrument"
         assert payload["native"] is True and payload["carla"] is False
         assert payload["instrument_count"] == 1
         assert [p["name"] for p in payload["plugins"]] == ["Surge XT"]
-        payload = json.loads(srv.list_vst3_instruments(include_effects=True))
+        payload = json.loads(self._run(srv.list_vst3_instruments(include_effects=True)))
         assert payload["effect_count"] == 1 and len(payload["plugins"]) == 2
 
     def test_add_by_name_writes_native_vst3(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT")])
         project = self._new_project()
-        result = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Surge XT"))
+        result = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Surge XT")))
         assert result["host"] == "vst3instrument" and result["verified"] is True
         assert result["native"] is True and result["carla"] is False
         assert result["plugin_type"] == "VST3" and result["cid"] == SURGE_CID
@@ -420,18 +427,18 @@ class TestVst3ServerTools:
     def test_add_explicit_and_unverified(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT")])
         self._new_project()
-        result = json.loads(srv.add_vst3_instrument_track(
-            "Lead", module_path=SURGE_MODULE, cid=SURGE_CID.lower()))
+        result = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Lead", module_path=SURGE_MODULE, cid=SURGE_CID.lower())))
         assert result["cid"] == SURGE_CID
         # Unverified skip: a probe that would explode proves the sweep is skipped.
         self._patch(monkeypatch, [])
-        rejected = json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID))
+        rejected = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID)))
         assert "error" in rejected
         monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda *a, **k: (
             (_ for _ in ()).throw(AssertionError("discovery must be skipped"))))
-        accepted = json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID, allow_unverified=True))
+        accepted = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID, allow_unverified=True)))
         assert accepted["host"] == "vst3instrument" and accepted["verified"] is False
         # Nothing is synthesized for an unverified identity.
         assert accepted["plugin_name"] is None and accepted["vendor"] is None
@@ -446,27 +453,29 @@ class TestVst3ServerTools:
             return [_descriptor(name="Surge XT")]
 
         monkeypatch.setattr(vst3, "discover_vst3_plugins", spy)
+        monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
+        monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: None)
         self._new_project()
-        assert json.loads(srv.add_vst3_instrument_track(
-            "Lead", plugin="Surge XT")).get("verified") is True
-        assert json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID)).get("verified") is True
+        assert json.loads(self._run(srv.add_vst3_instrument_track(
+            "Lead", plugin="Surge XT"))).get("verified") is True
+        assert json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID))).get("verified") is True
         assert len(calls) == 2
 
     def test_add_resolution_errors(self, monkeypatch):
         self._new_project()
         self._patch(monkeypatch, [_descriptor(name="Surge XT"),
                                   _descriptor(name="Surge XT Effects")])
-        response = json.loads(srv.add_vst3_instrument_track("Lead"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead")))
         assert "error" in response  # no selection
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Nope"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Nope")))
         assert [p["name"] for p in response["available"]] == ["Surge XT", "Surge XT Effects"]
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="surge"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="surge")))
         assert [p["name"] for p in response["matches"]] == ["Surge XT", "Surge XT Effects"]
         self._patch(monkeypatch, [_descriptor(name="ZamComp", sub_categories="Fx|Dynamics")])
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="ZamComp"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="ZamComp")))
         assert "error" in response and response["available"] == []
-        response = json.loads(srv.add_vst3_instrument_track("Lead", module_path=SURGE_MODULE))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", module_path=SURGE_MODULE)))
         assert "both module_path and cid" in response["error"]
 
     @pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
@@ -479,7 +488,7 @@ class TestVst3ServerTools:
             raise error_type("serialization failed")
 
         monkeypatch.setattr(xml_parser, "configure_native_vst3_instrument", boom)
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Surge XT"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Surge XT")))
         assert "error" in response and find_tracks(project.root) == []
         assert project.modified is False
 
@@ -690,61 +699,3 @@ class TestVst3ProbeCtypes:
         assert vst3_probe.main([str(bundle)]) == 0
         payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert payload["classes"][0]["name"] == UNICODE_NAME
-
-    @pytest.mark.skipif(not plat.LINUX, reason="Linux Landlock/seccomp sandbox")
-    def test_default_probe_discovers_fixture_inside_linux_sandbox(self, tmp_path):
-        if not vst3_sandbox.sandbox_available():
-            pytest.skip("kernel does not provide Landlock/seccomp")
-        bundle = _build_fake_bundle(tmp_path)
-        result = vst3._probe_bundle(bundle)
-        assert result.get("classes", [{}])[0].get("cid") == FAKE_CID, result
-
-    @pytest.mark.skipif(not plat.LINUX, reason="Linux Landlock/seccomp sandbox")
-    def test_linux_probe_sandbox_blocks_out_of_root_io_and_network(self, tmp_path):
-        if not vst3_sandbox.sandbox_available():
-            pytest.skip("kernel does not provide Landlock/seccomp")
-        import sys
-
-        bundle = tmp_path / "Fixture.vst3"
-        scratch = tmp_path / "scratch"
-        bundle.mkdir()
-        scratch.mkdir()
-        inside = bundle / "readable.txt"
-        inside.write_text("plugin data")
-        outside = tmp_path / "outside.txt"
-        outside.write_text("must remain inaccessible")
-        source_root = Path(vst3_sandbox.__file__).resolve().parents[1]
-        code = textwrap.dedent(f"""
-            import pathlib, socket
-            from lmms_mcp.vst3_sandbox import enter_linux_sandbox
-            bundle = pathlib.Path({str(bundle)!r})
-            scratch = pathlib.Path({str(scratch)!r})
-            outside = pathlib.Path({str(outside)!r})
-            enter_linux_sandbox(bundle, scratch)
-            assert (bundle / "readable.txt").read_text() == "plugin data"
-            try:
-                outside.read_text()
-            except PermissionError:
-                pass
-            else:
-                raise AssertionError("outside file read was not confined")
-            try:
-                outside.write_text("escaped")
-            except PermissionError:
-                pass
-            else:
-                raise AssertionError("outside file write was not confined")
-            try:
-                socket.socket()
-            except OSError:
-                pass
-            else:
-                raise AssertionError("network socket was not blocked")
-            (scratch / "plugin-cache").write_text("allowed scratch")
-        """)
-        env = dict(os.environ, PYTHONPATH=str(source_root))
-        proc = subprocess.run([sys.executable, "-c", code], cwd=scratch, env=env,
-                              capture_output=True, text=True, timeout=10)
-        assert proc.returncode == 0, proc.stderr
-        assert outside.read_text() == "must remain inaccessible"
-        assert (scratch / "plugin-cache").read_text() == "allowed scratch"
