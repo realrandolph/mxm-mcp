@@ -254,6 +254,42 @@ def test_lv2_mixed_valid_and_malformed_port_state_is_not_loadable(tmp_path, monk
     assert preset["loadable"] is False
 
 
+@pytest.mark.parametrize("replacement", [
+    ('lv2:symbol "gain" ; pset:value 0.75',
+     'lv2:symbol "gain", "other" ; pset:value 0.75'),
+    ('lv2:symbol "gain" ; pset:value 0.75',
+     'lv2:symbol "gain" ; pset:value 0.75, 0.25'),
+])
+def test_lv2_multivalued_port_state_is_not_loadable(tmp_path, monkeypatch, replacement):
+    root = tmp_path / "lv2"
+    _, preset_path = _fixture_lv2_bundle(root)
+    contents = preset_path.read_text()
+    preset_path.write_text(contents.replace(*replacement))
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
+    monkeypatch.delenv("LV2_PATH", raising=False)
+    preset, = lv2.discover_lv2(refresh=True)["presets"]
+    assert preset["port_state_count"] == 1
+    assert preset["invalid_port_states"] == 1
+    assert preset["loadable"] is False
+
+
+def test_lv2_preset_can_live_in_a_separate_bundle_from_its_plugin(tmp_path, monkeypatch):
+    root = tmp_path / "lv2"
+    plugin_bundle, preset_file = _fixture_lv2_bundle(root)
+    separate_preset_bundle = root / "Shared Presets.lv2"
+    separate_preset_bundle.mkdir()
+    (separate_preset_bundle / "shared-presets.ttl").write_text(preset_file.read_text())
+    preset_file.unlink()
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
+    monkeypatch.delenv("LV2_PATH", raising=False)
+    index = lv2.discover_lv2(refresh=True)
+    plugin, = index["plugins"]
+    preset, = index["presets"]
+    assert plugin["bundle"] == str(plugin_bundle)
+    assert preset["plugin_uri"] == plugin["uri"]
+    assert preset["loadable"] is True
+
+
 def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatch):
     plugin_bundle = tmp_path / "Fixture Synth.vst3"
     plugin_bundle.mkdir()

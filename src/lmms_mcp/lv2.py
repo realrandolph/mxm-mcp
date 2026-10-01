@@ -241,11 +241,13 @@ def _bundle_index(bundle: Path) -> tuple[list[dict], list[dict]]:
         )
         invalid_port_states = 0
         for port_state in port_states:
-            symbol = _text(graph, port_state, URIRef(LV2 + "symbol"))
-            value = next(iter(graph.objects(port_state, URIRef(PS + "value"))), None)
-            if not symbol or value is None:
+            port_symbols = set(graph.objects(port_state, URIRef(LV2 + "symbol")))
+            port_values = set(graph.objects(port_state, URIRef(PS + "value")))
+            if len(port_symbols) != 1 or len(port_values) != 1:
                 invalid_port_states += 1
                 continue
+            symbol = str(next(iter(port_symbols)))
+            value = next(iter(port_values))
             try:
                 number = float(value)
             except (TypeError, ValueError, OverflowError):
@@ -297,6 +299,26 @@ def discover_lv2(refresh: bool = False) -> dict:
             plugins.extend(bundle_plugins)
             presets.extend(bundle_presets)
         plugins.sort(key=lambda item: (item["name"].casefold(), item["uri"].casefold()))
+        plugins_by_uri: dict[str, list[dict]] = {}
+        for plugin in plugins:
+            plugins_by_uri.setdefault(plugin["uri"], []).append(plugin)
+        for preset in presets:
+            matching_plugins = plugins_by_uri.get(preset["plugin_uri"], [])
+            input_symbols = [
+                {port["symbol"] for port in plugin["ports"]
+                 if port["direction"] == "input" and port["type"] == "control"}
+                for plugin in matching_plugins
+            ]
+            supported_symbols = set.intersection(*input_symbols) if input_symbols else set()
+            preset["loadable"] = (
+                bool(matching_plugins)
+                and all(plugin["is_instrument"] for plugin in matching_plugins)
+                and bool(preset["port_values"])
+                and preset["invalid_port_states"] == 0
+                and len(preset["port_values"]) == preset["port_state_count"]
+                and set(preset["port_values"]).issubset(supported_symbols)
+                and not preset["requires_opaque_state"]
+            )
         presets.sort(key=lambda item: (item["plugin_uri"].casefold(),
                                        item["name"].casefold(), item["id"].casefold()))
         return {"plugins": plugins, "presets": presets,
