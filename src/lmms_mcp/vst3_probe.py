@@ -19,10 +19,14 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import plistlib
 import sys
 from pathlib import Path
 
 from . import vst3_platform as plat
+from .path_safety import resolved_path_within
+
+_MAX_CLASSES = 4_096
 
 _IID_FACTORY2 = plat.iid_bytes("factory2")
 _IID_FACTORY3 = plat.iid_bytes("factory3")
@@ -115,10 +119,25 @@ def bundle_binary(bundle: str | Path) -> Path | None:
     """The loadable VST3 binary for *bundle* (a package, or a bare module)."""
     path = Path(bundle)
     if path.is_file():
-        return path
+        return path.resolve(strict=True)
     if not path.is_dir():
         return None
-    return next((p for p in plat.bundle_binaries(path) if p.is_file()), None)
+    if plat.MACOS:
+        contents = path / "Contents"
+        info_path = contents / "Info.plist"
+        try:
+            if info_path.stat().st_size > 1024 * 1024:
+                return None
+            with info_path.open("rb") as stream:
+                info = plistlib.load(stream)
+        except (OSError, plistlib.InvalidFileException, ValueError, RecursionError):
+            return None
+        executable = info.get("CFBundleExecutable") if isinstance(info, dict) else None
+        if not isinstance(executable, str) or not executable or Path(executable).name != executable:
+            return None
+        binary = resolved_path_within(contents / "MacOS" / executable, contents / "MacOS")
+        return binary if binary is not None and binary.is_file() else None
+    return next((p.resolve(strict=True) for p in plat.bundle_binaries(path) if p.is_file()), None)
 
 
 def describe_factory(factory) -> list[dict]:
@@ -128,6 +147,8 @@ def describe_factory(factory) -> list[dict]:
     to ``IPluginFactory2`` then v1, like the SDK's ``ClassInfo``.
     """
     count = _bind(factory, 4, ctypes.c_int32, (ctypes.c_void_p,))(_address(factory))
+    if count < 0 or count > _MAX_CLASSES:
+        raise ValueError(f"plugin factory class count {count} exceeds the {_MAX_CLASSES} limit")
     factory3 = _query_interface(factory, _IID_FACTORY3)
     factory2 = _query_interface(factory, _IID_FACTORY2)
     get3 = (_bind(factory3, 8, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p))
@@ -261,7 +282,8 @@ def _factory_vendor(factory) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    for bundle in (argv if argv is not None else sys.argv[1:]):
+    arguments = list(argv if argv is not None else sys.argv[1:])
+    for bundle in arguments:
         result = probe_bundle(bundle)
         sys.stdout.write(json.dumps(result) + "\n")
         sys.stdout.flush()

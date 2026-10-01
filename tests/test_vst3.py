@@ -5,12 +5,15 @@ output and a compiled stub module; serialization is pure XML. The end-to-end
 render check lives in ``test_lmms13_integration.py``.
 """
 
+import asyncio
 import ctypes
 import json
 import os
 import platform
+import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -171,6 +174,23 @@ class TestVst3Discovery:
         monkeypatch.setenv("VST3_PATH", str(tmp_path))
         assert {p.name for p in vst3.find_vst3_bundles()} == {
             "Real.vst3", "Top.vst3", "Inner.vst3"}
+
+    def test_vst3_symlink_bundles_are_confined_to_the_configured_root(
+            self, tmp_path, monkeypatch):
+        root = tmp_path / "configured"
+        root.mkdir()
+        inside = root / "Inside.vst3"
+        inside.mkdir()
+        outside = tmp_path / "Outside.vst3"
+        outside.mkdir()
+        (root / "Inside alias.vst3").symlink_to(inside, target_is_directory=True)
+        (root / "Outside alias.vst3").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [root])
+        monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+        monkeypatch.delenv("VST3_PATH", raising=False)
+        found = vst3.find_vst3_bundles()
+        assert len(found) == 1
+        assert found[0].resolve() == inside.resolve()
 
     def test_relative_vst3_path_is_absolute(self, tmp_path, monkeypatch):
         (tmp_path / "sub" / "Inner.vst3").mkdir(parents=True)
@@ -349,6 +369,37 @@ class TestVst3Platform:
         monkeypatch.setattr(plat, "MACOS", True)
         assert plat.bundle_binaries(bundle) == [bundle / "Contents" / "MacOS" / "Surge XT"]
 
+    def test_macos_bundle_binary_uses_info_plist_executable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(plat, "MACOS", True)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        bundle = tmp_path / "Fixture.vst3"
+        contents = bundle / "Contents"
+        macos = contents / "MacOS"
+        macos.mkdir(parents=True)
+        decoy = macos / "Fixture"
+        actual = macos / "DifferentExecutable"
+        decoy.write_bytes(b"decoy executable")
+        actual.write_bytes(b"CFBundleExecutable target")
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "DifferentExecutable",
+        }))
+
+        assert vst3_probe.bundle_binary(bundle) == actual.resolve()
+
+    def test_macos_bundle_binary_rejects_executable_path_escape(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(plat, "MACOS", True)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        bundle = tmp_path / "Escaping.vst3"
+        contents = bundle / "Contents"
+        (contents / "MacOS").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"not inside the bundle")
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "../../outside",
+        }))
+
+        assert vst3_probe.bundle_binary(bundle) is None
+
     def test_app_dir_layouts(self, monkeypatch, tmp_path):
         exe = tmp_path / "bin" / "mxm"
         (tmp_path / "bin" / "vst3").mkdir(parents=True)
@@ -370,6 +421,12 @@ class TestVst3Platform:
 class TestVst3ServerTools:
     def _patch(self, monkeypatch, plugins):
         monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda *a, **k: plugins)
+        monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
+        monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: None)
+
+    @staticmethod
+    def _run(awaitable):
+        return asyncio.run(awaitable)
 
     def _new_project(self):
         project = LMMSProject()
@@ -380,18 +437,18 @@ class TestVst3ServerTools:
     def test_list_instruments_and_effects(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT"),
                                   _descriptor(name="ZamComp", sub_categories="Fx|Dynamics")])
-        payload = json.loads(srv.list_vst3_instruments())
+        payload = json.loads(self._run(srv.list_vst3_instruments()))
         assert payload["host"] == "vst3instrument"
         assert payload["native"] is True and payload["carla"] is False
         assert payload["instrument_count"] == 1
         assert [p["name"] for p in payload["plugins"]] == ["Surge XT"]
-        payload = json.loads(srv.list_vst3_instruments(include_effects=True))
+        payload = json.loads(self._run(srv.list_vst3_instruments(include_effects=True)))
         assert payload["effect_count"] == 1 and len(payload["plugins"]) == 2
 
     def test_add_by_name_writes_native_vst3(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT")])
         project = self._new_project()
-        result = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Surge XT"))
+        result = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Surge XT")))
         assert result["host"] == "vst3instrument" and result["verified"] is True
         assert result["native"] is True and result["carla"] is False
         assert result["plugin_type"] == "VST3" and result["cid"] == SURGE_CID
@@ -403,18 +460,18 @@ class TestVst3ServerTools:
     def test_add_explicit_and_unverified(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT")])
         self._new_project()
-        result = json.loads(srv.add_vst3_instrument_track(
-            "Lead", module_path=SURGE_MODULE, cid=SURGE_CID.lower()))
+        result = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Lead", module_path=SURGE_MODULE, cid=SURGE_CID.lower())))
         assert result["cid"] == SURGE_CID
         # Unverified skip: a probe that would explode proves the sweep is skipped.
         self._patch(monkeypatch, [])
-        rejected = json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID))
+        rejected = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID)))
         assert "error" in rejected
         monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda *a, **k: (
             (_ for _ in ()).throw(AssertionError("discovery must be skipped"))))
-        accepted = json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID, allow_unverified=True))
+        accepted = json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID, allow_unverified=True)))
         assert accepted["host"] == "vst3instrument" and accepted["verified"] is False
         # Nothing is synthesized for an unverified identity.
         assert accepted["plugin_name"] is None and accepted["vendor"] is None
@@ -429,27 +486,29 @@ class TestVst3ServerTools:
             return [_descriptor(name="Surge XT")]
 
         monkeypatch.setattr(vst3, "discover_vst3_plugins", spy)
+        monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
+        monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: None)
         self._new_project()
-        assert json.loads(srv.add_vst3_instrument_track(
-            "Lead", plugin="Surge XT")).get("verified") is True
-        assert json.loads(srv.add_vst3_instrument_track(
-            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID)).get("verified") is True
+        assert json.loads(self._run(srv.add_vst3_instrument_track(
+            "Lead", plugin="Surge XT"))).get("verified") is True
+        assert json.loads(self._run(srv.add_vst3_instrument_track(
+            "Pad", module_path=SURGE_MODULE, cid=SURGE_CID))).get("verified") is True
         assert len(calls) == 2
 
     def test_add_resolution_errors(self, monkeypatch):
         self._new_project()
         self._patch(monkeypatch, [_descriptor(name="Surge XT"),
                                   _descriptor(name="Surge XT Effects")])
-        response = json.loads(srv.add_vst3_instrument_track("Lead"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead")))
         assert "error" in response  # no selection
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Nope"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Nope")))
         assert [p["name"] for p in response["available"]] == ["Surge XT", "Surge XT Effects"]
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="surge"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="surge")))
         assert [p["name"] for p in response["matches"]] == ["Surge XT", "Surge XT Effects"]
         self._patch(monkeypatch, [_descriptor(name="ZamComp", sub_categories="Fx|Dynamics")])
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="ZamComp"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="ZamComp")))
         assert "error" in response and response["available"] == []
-        response = json.loads(srv.add_vst3_instrument_track("Lead", module_path=SURGE_MODULE))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", module_path=SURGE_MODULE)))
         assert "both module_path and cid" in response["error"]
 
     @pytest.mark.parametrize("error_type", [ValueError, RuntimeError])
@@ -462,7 +521,7 @@ class TestVst3ServerTools:
             raise error_type("serialization failed")
 
         monkeypatch.setattr(xml_parser, "configure_native_vst3_instrument", boom)
-        response = json.loads(srv.add_vst3_instrument_track("Lead", plugin="Surge XT"))
+        response = json.loads(self._run(srv.add_vst3_instrument_track("Lead", plugin="Surge XT")))
         assert "error" in response and find_tracks(project.root) == []
         assert project.modified is False
 
@@ -633,6 +692,21 @@ class TestVst3ProbeCtypes:
         bare = tmp_path / "Bare.vst3"
         bare.write_bytes(b"")
         assert vst3_probe.bundle_binary(bare) == bare
+
+    def test_capped_probe_stops_and_bounds_both_output_streams(self):
+        script = (
+            "import os; "
+            "os.write(1, b'x' * 2000000); "
+            "os.write(2, b'y' * 2000000)"
+        )
+        stdout, stderr, _status, timed_out, exceeded = vst3._run_capped_probe(
+            [sys.executable, "-c", script], output_limit=32 * 1024, timeout=10,
+        )
+
+        assert not timed_out
+        assert exceeded
+        assert len(stdout) <= 32 * 1024
+        assert len(stderr) <= 32 * 1024
 
     def test_module_loader_is_cdll(self):
         # The exported entry points are plain C functions; WinDLL would impose

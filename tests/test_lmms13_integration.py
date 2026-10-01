@@ -1,5 +1,6 @@
 """End-to-end native Surge XT validation against the installed MXM."""
 
+import asyncio
 import json
 import subprocess
 import wave
@@ -233,8 +234,8 @@ def test_mxm_native_vst3_renders_audibly(tmp_path):
     project = LMMSProject()
     project.new(bpm=120)
     server.set_project(project)
-    result = json.loads(
-        server.add_vst3_instrument_track("Native VST3", plugin=chosen["name"]))
+    result = json.loads(asyncio.run(
+        server.add_vst3_instrument_track("Native VST3", plugin=chosen["name"])))
     assert result.get("host") == "vst3instrument" and result.get("verified") is True
     assert result["native"] is True and result["carla"] is False
     for key, pos in ((60, 0), (64, 48), (67, 96), (72, 144)):

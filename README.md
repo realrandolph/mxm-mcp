@@ -180,9 +180,9 @@ python -m lmms_mcp
 
 MXM is the only DAW binary this server detects or invokes. The server
 reads and writes LMMS-format project files directly - it never launches
-the MXM GUI. The installed MXM is only used for: preset discovery,
-plugin availability checks (warns about plugins the installed build
-lacks, e.g. SlicerT/Xpressive require a 1.3-lineage build) and audio
+the MXM GUI. The installed MXM is only used for ZynAddSubFX data-path
+resolution, plugin availability checks (warns about plugins the installed
+build lacks, e.g. SlicerT/Xpressive require a 1.3-lineage build) and audio
 rendering.
 
 ### Custom Plugins & VST
@@ -192,6 +192,12 @@ rendering.
 | `list_available_plugins` | Dynamically list ALL installed plugins (incl. custom ones) |
 | `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
 | `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
+| `list_native_plugins` | Enumerate filesystem-discovered VST3 and LV2 plugins |
+| `inspect_native_plugin` | Inspect a discovered VST3/LV2 plugin by name or identity |
+| `add_lv2_instrument_track` | Add an installed instrument with MXM's native LV2 host |
+| `list_plugin_presets` | Search installed VST3 and RDF-declared LV2 preset banks |
+| `load_native_plugin_preset` | Embed supported VST3/LV2 preset state in a project |
+| `refresh_native_plugin_discovery` | Clear cached indexes and rescan plugins/presets |
 | `scan_vst_directory` | Find legacy VST2 `.dll` files in a folder |
 | `add_vst_track` | Add a track hosting a legacy VST2 plugin (Vestige) |
 
@@ -210,6 +216,39 @@ factory interface ids use the platform's VST3 byte order (COM/GUID order on
 Windows), and class names are read through `IPluginFactory3` so non-ASCII
 names survive. MXM currently compiles its VST3 host for Linux and Windows;
 `host_available` reports whether the installed binary actually has it.
+
+Native VST3 and LV2 discovery reads installed bundles and RDF/filesystem
+metadata directly; it never starts the MXM GUI. VST3 scans include the usual
+platform paths and `$VST3_PATH`; LV2 scans include the standard bundle roots
+and `$LV2_PATH`. `list_plugin_presets` indexes `.vstpreset` component state,
+filesystem-based u-he `.h2p` banks (including Zebralette 3's installed banks),
+and LV2 `pset:Preset` RDF. `$VST3_PRESET_PATH` and `$UHE_PRESET_PATH` add preset
+roots. Factory/user origin and optional metadata are reported only when
+available. Refresh after installing or updating plugins/presets; indexes
+otherwise reuse filesystem-identity-checked cached results.
+
+VST3 factory probing executes third-party module code in a separate process.
+Before the first probe of each binary, the server requests per-plugin consent
+through MCP form elicitation when the client advertises support. The user can
+allow that probe once, permanently trust that exact binary, or deny it. Permanent
+decisions are stored in the user's local LMMS MCP config directory and are tied
+to the binary's SHA-256; replacing a binary requires a new decision. When a
+client lacks elicitation, the server returns a short-lived one-use token and a
+frozen action; the host should ask the user with its question UI before calling
+`resolve_native_plugin_access`. Denied plugins are skipped. Consent is not a
+sandbox: an approved plugin runs with the MCP server user's normal filesystem
+and network permissions. The trust file is
+`$XDG_CONFIG_HOME/lmms-mcp/native-plugin-permissions.json` (default
+`~/.config/lmms-mcp/native-plugin-permissions.json`) or
+`%APPDATA%/lmms-mcp/native-plugin-permissions.json` on Windows; remove an entry
+there to revoke a permanent decision.
+
+`load_native_plugin_preset` embeds VST3 component chunks or LV2 input-control
+port values into the MMP project. Preset formats without a known compatible
+project-state representation are listed but marked non-loadable; opaque state
+is not reverse-engineered or left dependent on the original preset file. VST3
+presets with separate controller/unknown state chunks are marked non-loadable
+until the MMP host representation can preserve those chunks too.
 
 ### Utilities
 

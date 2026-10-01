@@ -1,5 +1,6 @@
 """XML parser for LMMS .mmpz and .mmp project files."""
 
+import math
 import re
 import struct
 import zlib
@@ -400,11 +401,27 @@ _CARLA_ENGINE_SETTINGS = {
 }
 
 
-def configure_native_lv2_instrument(track: ET.Element, plugin_uri: str) -> None:
+def configure_native_lv2_instrument(
+    track: ET.Element,
+    plugin_uri: str,
+    port_values: dict[str, float] | None = None,
+) -> None:
     """Configure an instrument track for LMMS's native LV2 instrument host."""
     uri = plugin_uri.strip()
     if not uri.startswith(("http://", "https://", "urn:")):
         raise ValueError("Native LV2 instruments require a plugin URI")
+
+    model_attributes = {}
+    for symbol, raw_value in (port_values or {}).items():
+        if not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol):
+            raise ValueError(f"Invalid LV2 control port symbol: {symbol!r}")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid value for LV2 control port {symbol!r}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"Invalid non-finite value for LV2 control port {symbol!r}")
+        model_attributes[symbol] = repr(value)
 
     instrument = track.find("instrumenttrack/instrument")
     if instrument is None:
@@ -414,7 +431,8 @@ def configure_native_lv2_instrument(track: ET.Element, plugin_uri: str) -> None:
         instrument.remove(child)
 
     controls = ET.SubElement(instrument, "lv2controls")
-    ET.SubElement(controls, "models", {"freeWheeling": "0", "enabled": "1"})
+    models = ET.SubElement(controls, "models", {"freeWheeling": "0", "enabled": "1"})
+    models.attrib.update(model_attributes)
     key = ET.SubElement(controls, "key")
     ET.SubElement(key, "attribute", {"name": "uri", "value": uri})
 
