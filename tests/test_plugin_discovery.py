@@ -239,6 +239,21 @@ def test_lv2_path_and_cache_invalidation_on_preset_edit(tmp_path, monkeypatch):
     assert after["presets"][0]["port_values"] == {"gain": 0.25}
 
 
+def test_lv2_mixed_valid_and_malformed_port_state_is_not_loadable(tmp_path, monkeypatch):
+    root = tmp_path / "lv2"
+    _, preset_path = _fixture_lv2_bundle(root)
+    preset_path.write_text(preset_path.read_text() + f'''
+<{PRESET_URI}> lv2:port [ lv2:symbol "broken" ; pset:value "not-a-number" ] .
+''')
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [root])
+    monkeypatch.delenv("LV2_PATH", raising=False)
+    preset, = lv2.discover_lv2(refresh=True)["presets"]
+    assert preset["port_values"] == {"gain": 0.75}
+    assert preset["port_state_count"] == 2
+    assert preset["invalid_port_states"] == 1
+    assert preset["loadable"] is False
+
+
 def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatch):
     plugin_bundle = tmp_path / "Fixture Synth.vst3"
     plugin_bundle.mkdir()

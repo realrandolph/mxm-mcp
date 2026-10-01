@@ -239,17 +239,25 @@ def _bundle_index(bundle: Path) -> tuple[list[dict], list[dict]]:
             for subject in {preset_uri, *port_states}
             for predicate in graph.predicates(subject, None)
         )
+        invalid_port_states = 0
         for port_state in port_states:
             symbol = _text(graph, port_state, URIRef(LV2 + "symbol"))
             value = next(iter(graph.objects(port_state, URIRef(PS + "value"))), None)
             if not symbol or value is None:
+                invalid_port_states += 1
                 continue
             try:
                 number = float(value)
             except (TypeError, ValueError, OverflowError):
+                invalid_port_states += 1
                 continue
-            if number == number and abs(number) != float("inf"):
-                values[symbol] = number
+            if number != number or abs(number) == float("inf"):
+                invalid_port_states += 1
+                continue
+            if symbol in values:
+                invalid_port_states += 1
+                continue
+            values[symbol] = number
         source = source_by_subject.get(str(preset_uri), str((bundle / "manifest.ttl").resolve()))
         symbols = plugin_port_symbols.get(plugin_uri_text, set())
         presets.append({
@@ -265,8 +273,12 @@ def _bundle_index(bundle: Path) -> tuple[list[dict], list[dict]]:
             "source": source,
             "format": "lv2-rdf",
             "port_values": values,
+            "port_state_count": len(port_states),
+            "invalid_port_states": invalid_port_states,
             "requires_opaque_state": opaque_state,
-            "loadable": (bool(values) and set(values).issubset(symbols)
+            "loadable": (bool(values) and invalid_port_states == 0
+                         and len(values) == len(port_states)
+                         and set(values).issubset(symbols)
                          and plugin_instruments.get(plugin_uri_text, False)
                          and not opaque_state),
         })
