@@ -86,7 +86,13 @@ def test_plugin_name_filter_does_not_authorize_unrelated_vst3_bundles(
     }
     identified = []
     discovered = []
-    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [unrelated, target])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [tmp_path])
+    monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
+    monkeypatch.setattr(vst3, "find_vst3_bundles",
+                        lambda: pytest.fail("targeted lookup must not enumerate all bundles"))
+    monkeypatch.setattr(Path, "iterdir",
+                        lambda *_args, **_kwargs: pytest.fail("exact-name lookup should be direct"))
     monkeypatch.setattr(vst3_probe, "bundle_binary", lambda bundle: Path(bundle) / "module.so")
 
     def identify(module, _binary):
@@ -110,6 +116,84 @@ def test_plugin_name_filter_does_not_authorize_unrelated_vst3_bundles(
     assert denied == []
     assert identified == [target]
     assert discovered == [target]
+
+
+def test_unresolvable_plugin_filter_does_not_fall_back_to_all_bundles(
+        tmp_path, monkeypatch):
+    bundle = tmp_path / "Vendor Module.vst3"
+    binary = bundle / "Contents" / "x86_64-linux" / "Vendor.so"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"synthetic module")
+    probes = []
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [tmp_path])
+    monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
+    monkeypatch.setattr(vst3, "find_vst3_bundles",
+                        lambda: pytest.fail("targeted lookup must not enumerate all bundles"))
+    monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: binary)
+    monkeypatch.setattr(vst3, "_probe_bundle", lambda path: probes.append(path))
+    identified = []
+    monkeypatch.setattr(plugin_permissions, "identify_plugin",
+                        lambda *args: identified.append(args))
+
+    plugins, denied = asyncio.run(server._authorized_vst3_plugins(
+        FakeContext(capabilities=False), "list_plugin_presets", {},
+        plugin_query="Zebralette3",
+    ))
+
+    assert plugins == []
+    assert denied and "exact bundle path" in denied[0]["reason"]
+    assert identified == []
+    assert probes == []
+
+
+def test_cached_plugin_descriptor_resolves_nonmatching_bundle_name(tmp_path, monkeypatch):
+    bundle = tmp_path / "Vendor Module.vst3"
+    binary = bundle / "Contents" / "x86_64-linux" / "Vendor.so"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"synthetic module")
+    probes = []
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [tmp_path])
+    monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
+    monkeypatch.setattr(vst3, "find_vst3_bundles",
+                        lambda: pytest.fail("targeted lookup must not enumerate all bundles"))
+    monkeypatch.setattr(vst3_probe, "bundle_binary", lambda _bundle: binary)
+    monkeypatch.setattr(vst3, "_probe_bundle", lambda path: probes.append(path))
+    identity = plugin_permissions.identify_plugin(bundle, binary)
+    plugin_permissions.cache_probe(identity, {
+        "module": str(bundle),
+        "classes": [{"name": "Zebralette3", "cid": "A1B2C3D4E5F60718293A4B4C55667788"}],
+    })
+    discovered = []
+
+    def discover(**kwargs):
+        discovered.extend(kwargs["bundles"])
+        return [{"module": str(bundle), "name": "Zebralette3", "is_instrument": True}]
+
+    monkeypatch.setattr(vst3, "discover_vst3_plugins", discover)
+    plugins, denied = asyncio.run(server._authorized_vst3_plugins(
+        FakeContext(capabilities=False), "list_plugin_presets", {},
+        plugin_query="Zebralette3",
+    ))
+
+    assert [item["name"] for item in plugins] == ["Zebralette3"]
+    assert denied == []
+    assert discovered == [bundle]
+    assert probes == []
+
+
+def test_cached_plugin_lookup_does_not_match_vendor_or_parent_folder(tmp_path):
+    identity = plugin_permissions.PluginIdentity(
+        "/plugins/u-he/Vendor Module.vst3", "/plugins/u-he/Vendor.so", "a" * 64,
+    )
+    plugin_permissions.cache_probe(identity, {
+        "module": identity.module,
+        "classes": [{"name": "Zebralette3", "vendor": "u-he", "cid": "A1" * 16}],
+    })
+
+    assert plugin_permissions.cached_probe_modules("u-he") == []
+    assert plugin_permissions.cached_probe_modules("Zebralette3") == [identity.module]
 
 
 def test_elicitation_permanent_allow_and_deny_are_binary_scoped(tmp_path, monkeypatch):

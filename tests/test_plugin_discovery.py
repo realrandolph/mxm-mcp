@@ -287,6 +287,32 @@ def test_plugin_filtered_preset_tool_indexes_only_matching_vst3_records(monkeypa
     assert result["presets"][0]["name"] == "Warm Pad"
 
 
+def test_plugin_filtered_all_search_preserves_matching_lv2_results(monkeypatch):
+    target = {**_vst3_plugin(Path("/plugins/Zebralette3.vst3")),
+              "name": "Zebralette3"}
+
+    async def authorize(*_args, **_kwargs):
+        return [target], []
+
+    monkeypatch.setattr(server, "_authorized_vst3_plugins", authorize)
+    monkeypatch.setattr(vst3_presets, "discover_vst3_presets", lambda *_args, **_kwargs: {
+        "presets": [{"name": "Warm Pad", "plugin_name": "Zebralette3",
+                     "plugin_cid": CID, "plugin_module": target["module"]}],
+    })
+    monkeypatch.setattr(lv2, "discover_lv2", lambda **_kwargs: {
+        "plugins": [{"uri": PLUGIN_URI, "name": "Zebralette3", "vendor": "Example"}],
+        "presets": [{"name": "Second Pad", "plugin_uri": PLUGIN_URI,
+                     "source": "/lv2/second.ttl"}],
+    })
+
+    result = json.loads(_run_tool(server.list_plugin_presets(
+        "all", plugin="Zebralette3", limit=200,
+    )))
+
+    assert result["total"] == 2
+    assert {item["name"] for item in result["presets"]} == {"Warm Pad", "Second Pad"}
+
+
 def test_plugin_scoped_preset_cache_fingerprints_and_builds_per_plugin(
         tmp_path, monkeypatch):
     global_root = tmp_path / "u-he"
@@ -506,7 +532,10 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     state = _write_vstpreset(preset_path)
     plugin = _vst3_plugin(plugin_bundle)
     monkeypatch.setattr(vst3, "discover_vst3_plugins", lambda **kwargs: [plugin])
-    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [])
+    monkeypatch.setattr(vst3, "find_vst3_bundles", lambda: [plugin_bundle])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [tmp_path])
+    monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
                         lambda plugins=None, **kwargs: [tmp_path])
     project, track = _new_project(xml_parser.NATIVE_VST3_HOST)

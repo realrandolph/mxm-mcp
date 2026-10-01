@@ -230,7 +230,13 @@ When `list_plugin_presets` has a VST3 `plugin` filter, it searches bundle- and
 product-specific preset locations (plus explicitly configured preset roots)
 instead of recursively indexing every standard VST3/u-he root. Without a
 plugin filter, it performs the global preset search. `limit` controls returned
-pagination, not the amount of discovery work.
+pagination, not the amount of discovery work. If a plugin name does not match
+its bundle name and no previously probed descriptor is cached, use the exact
+bundle path or an unfiltered query for global discovery; the server will not
+prompt for unrelated VST3 plugins just to resolve an ambiguous name. With
+`plugin_type="all"`, LV2 discovery remains global so matching presets from
+both plugin formats are preserved; use `plugin_type="vst3"` for a strictly
+VST3-scoped search.
 
 VST3 factory probing executes third-party module code in a separate process.
 Before the first probe of each binary, the server requests per-plugin consent
