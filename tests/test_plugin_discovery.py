@@ -239,6 +239,24 @@ def test_plugin_scoped_vst3_preset_search_uses_plugin_roots_only(tmp_path, monke
     assert [item["name"] for item in index["presets"]] == ["Warm Pad"]
 
 
+def test_plugin_scoped_vst3_search_honors_explicit_flat_preset_roots(tmp_path, monkeypatch):
+    bundle = tmp_path / "plugins" / "Zebralette3.vst3"
+    bundle.mkdir(parents=True)
+    configured_root = tmp_path / "custom-preset-root"
+    _write_vstpreset(configured_root / "Factory Pad.vstpreset")
+    plugin = {**_vst3_plugin(bundle), "name": "Zebralette3", "vendor": "u-he"}
+    monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
+    monkeypatch.setenv("VST3_PRESET_PATH", str(configured_root))
+    monkeypatch.delenv("UHE_PRESET_PATH", raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
+
+    index = vst3_presets.discover_vst3_presets([plugin], plugin_scoped=True, refresh=True)
+
+    assert str(configured_root) in index["search_paths"]
+    assert [item["name"] for item in index["presets"]] == ["Warm Pad"]
+
+
 def test_plugin_filtered_preset_tool_indexes_only_matching_vst3_records(monkeypatch):
     target = {**_vst3_plugin(Path("/plugins/Zebralette3.vst3")),
               "name": "Zebralette3"}

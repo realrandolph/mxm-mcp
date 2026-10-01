@@ -226,6 +226,11 @@ and LV2 `pset:Preset` RDF. `$VST3_PRESET_PATH` and `$UHE_PRESET_PATH` add preset
 roots. Factory/user origin and optional metadata are reported only when
 available. Refresh after installing or updating plugins/presets; indexes
 otherwise reuse filesystem-identity-checked cached results.
+When `list_plugin_presets` has a VST3 `plugin` filter, it searches bundle- and
+product-specific preset locations (plus explicitly configured preset roots)
+instead of recursively indexing every standard VST3/u-he root. Without a
+plugin filter, it performs the global preset search. `limit` controls returned
+pagination, not the amount of discovery work.
 
 VST3 factory probing executes third-party module code in a separate process.
 Before the first probe of each binary, the server requests per-plugin consent

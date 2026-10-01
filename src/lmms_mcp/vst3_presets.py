@@ -61,11 +61,11 @@ def preset_search_paths(
     if plugin_scoped:
         # A filtered query should not recursively walk global preset/plugin
         # roots. Search common product/vendor subdirectories and paths adjacent
-        # to each selected bundle instead.
-        bases = standard_preset_dirs()
-        bases += _path_entries("VST3_PRESET_PATH")
-        bases += _path_entries("UHE_PRESET_PATH")
-        paths: list[Path] = []
+        # to each selected bundle instead. Explicit preset roots remain honored
+        # as configured: they are user-selected search locations.
+        explicit_roots = _path_entries("VST3_PRESET_PATH") + _path_entries("UHE_PRESET_PATH")
+        bases = standard_preset_dirs() + explicit_roots
+        paths: list[Path] = list(explicit_roots)
         for plugin in plugins:
             bundle = Path(plugin.get("module", ""))
             name = str(plugin.get("name", "")).strip()
