@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -11,8 +12,9 @@ from .path_safety import resolved_path_within
 
 T = TypeVar("T")
 _lock = threading.RLock()
-_entries: dict[str, tuple[tuple[tuple[object, ...], ...], object]] = {}
+_entries: OrderedDict[str, tuple[tuple[tuple[object, ...], ...], object]] = OrderedDict()
 _MAX_FINGERPRINT_ENTRIES = 100_000
+_MAX_CACHE_ENTRIES = 32
 
 
 def _stat_signature(path: Path) -> tuple[object, ...] | None:
@@ -126,10 +128,14 @@ def cached_discovery(
     with _lock:
         cached = _entries.get(key)
         if not refresh and cached is not None and cached[0] == snapshot:
+            _entries.move_to_end(key)
             return cached[1]  # type: ignore[return-value]
     value = discover()
     with _lock:
         _entries[key] = (snapshot, value)
+        _entries.move_to_end(key)
+        while len(_entries) > _MAX_CACHE_ENTRIES:
+            _entries.popitem(last=False)
     return value
 
 

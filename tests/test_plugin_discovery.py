@@ -435,6 +435,19 @@ def test_discovery_cache_does_not_fingerprint_symlink_targets_outside_root(tmp_p
     assert discovery_cache.filesystem_fingerprint([root]) == before
 
 
+def test_discovery_cache_bounds_plugin_scoped_index_entries(monkeypatch):
+    monkeypatch.setattr(discovery_cache, "_MAX_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(discovery_cache, "filesystem_fingerprint", lambda _paths: ())
+
+    for index in range(3):
+        discovery_cache.cached_discovery(
+            f"vst3.presets.plugin.{index}", [], lambda index=index: {"index": index},
+        )
+
+    assert len(discovery_cache._entries) == 2
+    assert "vst3.presets.plugin.0" not in discovery_cache._entries
+
+
 def test_lv2_mixed_valid_and_malformed_port_state_is_not_loadable(tmp_path, monkeypatch):
     root = tmp_path / "lv2"
     _, preset_path = _fixture_lv2_bundle(root)
