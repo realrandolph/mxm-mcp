@@ -5,13 +5,15 @@ output and a compiled stub module; serialization is pure XML. The end-to-end
 render check lives in ``test_lmms13_integration.py``.
 """
 
-import ctypes
 import asyncio
+import ctypes
 import json
 import os
 import platform
+import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -367,6 +369,37 @@ class TestVst3Platform:
         monkeypatch.setattr(plat, "MACOS", True)
         assert plat.bundle_binaries(bundle) == [bundle / "Contents" / "MacOS" / "Surge XT"]
 
+    def test_macos_bundle_binary_uses_info_plist_executable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(plat, "MACOS", True)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        bundle = tmp_path / "Fixture.vst3"
+        contents = bundle / "Contents"
+        macos = contents / "MacOS"
+        macos.mkdir(parents=True)
+        decoy = macos / "Fixture"
+        actual = macos / "DifferentExecutable"
+        decoy.write_bytes(b"decoy executable")
+        actual.write_bytes(b"CFBundleExecutable target")
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "DifferentExecutable",
+        }))
+
+        assert vst3_probe.bundle_binary(bundle) == actual.resolve()
+
+    def test_macos_bundle_binary_rejects_executable_path_escape(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(plat, "MACOS", True)
+        monkeypatch.setattr(plat, "WINDOWS", False)
+        bundle = tmp_path / "Escaping.vst3"
+        contents = bundle / "Contents"
+        (contents / "MacOS").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"not inside the bundle")
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "../../outside",
+        }))
+
+        assert vst3_probe.bundle_binary(bundle) is None
+
     def test_app_dir_layouts(self, monkeypatch, tmp_path):
         exe = tmp_path / "bin" / "mxm"
         (tmp_path / "bin" / "vst3").mkdir(parents=True)
@@ -659,6 +692,21 @@ class TestVst3ProbeCtypes:
         bare = tmp_path / "Bare.vst3"
         bare.write_bytes(b"")
         assert vst3_probe.bundle_binary(bare) == bare
+
+    def test_capped_probe_stops_and_bounds_both_output_streams(self):
+        script = (
+            "import os; "
+            "os.write(1, b'x' * 2000000); "
+            "os.write(2, b'y' * 2000000)"
+        )
+        stdout, stderr, _status, timed_out, exceeded = vst3._run_capped_probe(
+            [sys.executable, "-c", script], output_limit=32 * 1024, timeout=10,
+        )
+
+        assert not timed_out
+        assert exceeded
+        assert len(stdout) <= 32 * 1024
+        assert len(stderr) <= 32 * 1024
 
     def test_module_loader_is_cdll(self):
         # The exported entry points are plain C functions; WinDLL would impose

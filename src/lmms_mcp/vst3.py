@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import discovery_cache
@@ -172,27 +174,113 @@ def find_vst3_bundles(extra_paths: list[str] | None = None) -> list[Path]:
     return bundles
 
 
+def _terminate_probe_process(process: subprocess.Popen) -> None:
+    """Stop the probe and, on POSIX, its subprocess group."""
+    try:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _run_capped_probe(command: list[str], output_limit: int, timeout: float):
+    """Run a probe while bounding captured stdout and stderr independently."""
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name != "nt",
+        creationflags=creationflags,
+    )
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    totals = {"stdout": 0, "stderr": 0}
+    exceeded = threading.Event()
+    discard_capture = threading.Event()
+
+    def drain(name: str, pipe) -> None:
+        target = captured[name]
+        try:
+            while True:
+                chunk = pipe.read(64 * 1024)
+                if not chunk:
+                    return
+                if totals[name] + len(chunk) > output_limit:
+                    if not exceeded.is_set():
+                        exceeded.set()
+                        _terminate_probe_process(process)
+                    return
+                totals[name] = min(output_limit + 1, totals[name] + len(chunk))
+                if exceeded.is_set():
+                    return
+                if not discard_capture.is_set():
+                    target.extend(chunk)
+        except (OSError, ValueError):
+            return
+        finally:
+            pipe.close()
+
+    readers = [
+        threading.Thread(target=drain, args=(name, pipe), daemon=True)
+        for name, pipe in (("stdout", process.stdout), ("stderr", process.stderr))
+    ]
+    for reader in readers:
+        reader.start()
+
+    timed_out = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_probe_process(process)
+        process.wait()
+
+    # Normally process exit closes both pipes. A hostile plugin could leave a
+    # descendant holding one open; do not let that pin this MCP request forever.
+    for reader in readers:
+        reader.join(timeout=1.0)
+    if any(reader.is_alive() for reader in readers):
+        # A child may have inherited a pipe after the probe exited. Stop
+        # retaining output and close our read ends rather than leaking memory.
+        discard_capture.set()
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+    for reader in readers:
+        reader.join(timeout=0.1)
+    return (bytes(captured["stdout"]), bytes(captured["stderr"]), process.returncode,
+            timed_out, exceeded.is_set())
+
+
 def _probe_bundle(bundle: Path) -> dict:
     """Introspect one user-approved bundle in a crash-isolated process."""
     try:
-        proc = subprocess.run(
+        stdout, stderr, returncode, timed_out, output_exceeded = _run_capped_probe(
             [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECONDS,
+            _PROBE_OUTPUT_LIMIT, _PROBE_TIMEOUT_SECONDS,
         )
-        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         return {"module": str(bundle), "error": f"{type(exc).__name__}: {exc}"}
-    if len(stdout.encode("utf-8")) > _PROBE_OUTPUT_LIMIT \
-            or len(stderr.encode("utf-8")) > _PROBE_OUTPUT_LIMIT:
+    if timed_out:
+        return {"module": str(bundle), "error": "VST3 probe timed out"}
+    if output_exceeded:
         return {"module": str(bundle), "error": "VST3 probe output limit exceeded"}
-    for line in stdout.splitlines():
+    stdout_text = stdout.decode("utf-8", "replace")
+    stderr_text = stderr.decode("utf-8", "replace")
+    for line in stdout_text.splitlines():
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
             return payload
-    message = (stderr or stdout).strip()
+    message = (stderr_text or stdout_text).strip()
     return {"module": str(bundle), "error": message or f"probe exited {returncode}"}
 
 
