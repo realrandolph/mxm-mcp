@@ -122,6 +122,32 @@ def test_linux_vst3_standard_paths_include_home_usr_and_local(monkeypatch, tmp_p
     assert Path("/usr/local/lib/vst3") in dirs
 
 
+def test_vst3_preset_paths_follow_plugin_agnostic_platform_conventions(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(vst3_presets.sys, "platform", "linux")
+    linux_roots = vst3_presets.standard_preset_dirs()
+    assert tmp_path / ".vst3/presets" in linux_roots
+    assert Path("/usr/share/vst3/presets") in linux_roots
+    assert Path("/usr/local/share/vst3/presets") in linux_roots
+    assert not any("u-he" in str(path).casefold() for path in linux_roots)
+
+    monkeypatch.setattr(vst3_presets.sys, "platform", "win32")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "profile"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "programdata"))
+    windows_roots = vst3_presets.standard_preset_dirs()
+    assert tmp_path / "profile/Documents/VST3 Presets" in windows_roots
+    assert tmp_path / "roaming/VST3 Presets" in windows_roots
+    assert tmp_path / "programdata/VST3 Presets" in windows_roots
+
+    monkeypatch.setattr(vst3_presets.sys, "platform", "darwin")
+    mac_roots = vst3_presets.standard_preset_dirs()
+    assert tmp_path / "Library/Audio/Presets" in mac_roots
+    assert Path("/Library/Audio/Presets") in mac_roots
+    assert Path("/Network/Library/Audio/Presets") in mac_roots
+
+
 def test_vst3_plugin_probe_results_are_cached_and_invalidate_on_binary_change(
         tmp_path, monkeypatch):
     bundle = tmp_path / "Cache.vst3"
@@ -194,38 +220,48 @@ def test_vst3_controller_state_chunk_is_reported_and_not_marked_loadable(tmp_pat
     assert parsed["loadable"] is False
 
 
-def test_vst3_user_factory_preset_banks_and_h2p_are_indexed_without_fake_metadata(
+def test_vst3_user_and_factory_preset_banks_are_indexed(
         tmp_path, monkeypatch):
     root = tmp_path / "banks"
     factory = root / "Factory" / "Bass"
     user = root / "User" / "Leads"
     _write_vstpreset(factory / "Factory Lead.vstpreset")
-    (user / "User Lead.h2p").parent.mkdir(parents=True)
-    (user / "User Lead.h2p").write_text("# opaque user preset")
+    _write_vstpreset(user / "User Lead.vstpreset", cid="CD" * 16)
+    (user / "Legacy.h2p").write_text("vendor-specific opaque bank")
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
                         lambda plugins=None, **kwargs: [root])
     plugin = _vst3_plugin(tmp_path / "Fixture Synth.vst3")
     presets = vst3_presets.discover_vst3_presets([plugin], refresh=True)["presets"]
-    by_name = {item["name"]: item for item in presets}
-    assert set(by_name) == {"Warm Pad", "User Lead"}
-    assert by_name["Warm Pad"]["origin"] == "factory"
-    assert by_name["User Lead"]["origin"] == "user"
-    assert by_name["User Lead"]["author"] is None
-    assert by_name["User Lead"]["loadable"] is False
+    assert len(presets) == 2
+    assert {item["origin"] for item in presets} == {"factory", "user"}
+    assert {item["format"] for item in presets} == {"vstpreset"}
+
+
+def test_vst3_preset_roots_follow_vendor_and_product_directory_layout(tmp_path, monkeypatch):
+    bundle = tmp_path / "plugins" / "Synth.vst3"
+    bundle.mkdir(parents=True)
+    root = tmp_path / "preset-root"
+    plugin = {**_vst3_plugin(bundle), "name": "Synth / Deluxe", "vendor": "Example: Audio"}
+    monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [root])
+    monkeypatch.delenv("VST3_PRESET_PATH", raising=False)
+
+    paths = vst3_presets.preset_search_paths([plugin], plugin_scoped=True)
+
+    assert root / "Example_ Audio" / "Synth _ Deluxe" in paths
 
 
 def test_plugin_scoped_vst3_preset_search_uses_plugin_roots_only(tmp_path, monkeypatch):
-    search_root = tmp_path / "u-he"
+    search_root = tmp_path / "vst3-presets"
     target_bundle = tmp_path / "plugins" / "Zebralette3.vst3"
     target_bundle.mkdir(parents=True)
-    target_root = search_root / "Zebralette3.data" / "Presets"
-    other_root = search_root / "Hive.data" / "Presets"
+    target_root = search_root / "u-he" / "Zebralette3"
+    other_root = search_root / "u-he" / "Hive"
     _write_vstpreset(target_root / "Factory" / "Warm Pad.vstpreset")
     _write_vstpreset(other_root / "Factory" / "Other.vstpreset")
     plugin = {**_vst3_plugin(target_bundle), "name": "Zebralette3", "vendor": "u-he"}
     monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [search_root])
     monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
-    for variable in ("VST3_PRESET_PATH", "UHE_PRESET_PATH", "VST3_PATH"):
+    for variable in ("VST3_PRESET_PATH", "VST3_PATH"):
         monkeypatch.delenv(variable, raising=False)
 
     paths = vst3_presets.preset_search_paths([plugin], plugin_scoped=True)
@@ -248,7 +284,6 @@ def test_plugin_scoped_vst3_search_honors_explicit_flat_preset_roots(tmp_path, m
     monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [])
     monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
     monkeypatch.setenv("VST3_PRESET_PATH", str(configured_root))
-    monkeypatch.delenv("UHE_PRESET_PATH", raising=False)
     monkeypatch.delenv("VST3_PATH", raising=False)
 
     index = vst3_presets.discover_vst3_presets([plugin], plugin_scoped=True, refresh=True)
@@ -315,14 +350,14 @@ def test_plugin_filtered_all_search_preserves_matching_lv2_results(monkeypatch):
 
 def test_plugin_scoped_preset_cache_fingerprints_and_builds_per_plugin(
         tmp_path, monkeypatch):
-    global_root = tmp_path / "u-he"
+    global_root = tmp_path / "vst3-presets"
     bundle_root = tmp_path / "plugins"
     first_bundle = bundle_root / "Zebralette3.vst3"
     second_bundle = bundle_root / "Hive.vst3"
     first_bundle.mkdir(parents=True)
     second_bundle.mkdir(parents=True)
-    first_preset_root = global_root / "Zebralette3.data" / "Presets"
-    second_preset_root = global_root / "Hive.data" / "Presets"
+    first_preset_root = global_root / "u-he" / "Zebralette3"
+    second_preset_root = global_root / "u-he" / "Hive"
     _write_vstpreset(first_preset_root / "Warm Pad.vstpreset")
     _write_vstpreset(second_preset_root / "Bass.vstpreset", cid="CD" * 16)
     first_plugin = {**_vst3_plugin(first_bundle), "name": "Zebralette3", "vendor": "u-he"}
@@ -330,7 +365,7 @@ def test_plugin_scoped_preset_cache_fingerprints_and_builds_per_plugin(
                      "vendor": "u-he"}
     monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [global_root])
     monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
-    for variable in ("VST3_PRESET_PATH", "UHE_PRESET_PATH", "VST3_PATH"):
+    for variable in ("VST3_PRESET_PATH", "VST3_PATH"):
         monkeypatch.delenv(variable, raising=False)
     build_paths = []
     fingerprint_paths = []
