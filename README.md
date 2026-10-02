@@ -227,20 +227,15 @@ user/shared preset roots and company/plugin subdirectories, with
 RDF in LV2 bundles. Factory/user origin and optional metadata are reported
 only when available. Refresh after installing or updating plugins/presets;
 indexes otherwise reuse filesystem-identity-checked cached results.
-When `list_plugin_presets` has a VST3 `plugin` filter, it searches bundle- and
-company/product-specific preset locations (plus explicitly configured preset
-roots) instead of recursively indexing every standard VST3 preset root. Without a
-plugin filter, it performs the global preset search. `limit` controls returned
-pagination, not the amount of discovery work. If a plugin name does not match
-its bundle name and no previously probed descriptor is cached, use the exact
-bundle path or an unfiltered query for global discovery; the server will not
-prompt for unrelated VST3 plugins just to resolve an ambiguous name. With
-`plugin_type="all"`, LV2 discovery remains global so matching presets from
-both plugin formats are preserved; use `plugin_type="vst3"` for a strictly
-VST3-scoped search. To target a discovered VST3 reliably, pass its `module`
-bundle path from `list_native_plugins`/`list_vst3_instruments` as `plugin`;
-its `cid` is also resolvable if that plugin was probed earlier in the same
-server process.
+`list_plugin_presets` requires a `plugin` value and returns presets only for
+that plugin; there is no unfiltered/global preset search. Use the plugin name,
+LV2 URI, VST3 `module` bundle path, or VST3 `cid` from
+`list_native_plugins`/`list_vst3_instruments`. Passing the VST3 `module` path is
+most reliable; a `cid` also resolves when its descriptor was probed earlier in
+the same server process. Name-filtered VST3 searches avoid recursively scanning
+the entire VST3 catalog or prompting for unrelated plugins. `plugin_type="all"`
+searches the specified plugin across VST3 and LV2; specify `vst3` or `lv2` to
+limit the format. `limit` controls returned pagination, not discovery work.
 
 VST3 factory probing executes third-party module code in a separate process.
 Before the first probe of each binary, the server requests per-plugin consent

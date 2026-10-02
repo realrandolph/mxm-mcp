@@ -1914,8 +1914,8 @@ async def inspect_native_plugin(
 
 @mcp.tool()
 async def list_plugin_presets(
+    plugin: str,
     plugin_type: str = "all",
-    plugin: str = "",
     query: str = "",
     bank: str = "",
     category: str = "",
@@ -1931,8 +1931,8 @@ async def list_plugin_presets(
     """Search installed VST3 and RDF-declared LV2 presets, including factory banks.
 
     Args:
+        plugin: Required plugin name, LV2 URI, VST3 module path or class CID
         plugin_type: ``all``, ``vst3`` or ``lv2``
-        plugin: Optional plugin name, LV2 URI, VST3 module path or class CID
         query: Case-insensitive preset-name search
         bank: Filter by bank
         category: Filter by category
@@ -1944,6 +1944,9 @@ async def list_plugin_presets(
         limit: Maximum results (1-1000)
         refresh: Force a filesystem rescan
     """
+    plugin = plugin.strip()
+    if not plugin:
+        return json.dumps({"error": "plugin is required; pass a plugin name, URI, module path, or CID"})
     plugin_type = plugin_type.strip().lower()
     if plugin_type not in {"all", "vst3", "lv2"}:
         return json.dumps({"error": "plugin_type must be 'all', 'vst3', or 'lv2'"})
@@ -1952,7 +1955,11 @@ async def list_plugin_presets(
         limit = min(1000, max(1, int(limit)))
         all_presets: list[dict] = []
         denied_plugins: list[dict] = []
-        if plugin_type in {"all", "vst3"}:
+        lv2_uri_query = plugin.casefold().startswith(("http://", "https://"))
+        vst3_identity_query = (Path(plugin).suffix.lower() == ".vst3"
+                               or vst3_mod.is_valid_cid(plugin))
+        if (plugin_type in {"all", "vst3"}
+                and not (plugin_type == "all" and lv2_uri_query)):
             call_args = {
                 "plugin_type": plugin_type, "plugin": plugin, "query": query,
                 "bank": bank, "category": category, "tags": tags, "author": author,
@@ -1966,12 +1973,13 @@ async def list_plugin_presets(
             scoped_plugins = ([record for record in plugins
                                if _record_matches_plugin_query(record, plugin)]
                               if plugin else plugins)
-            if not plugin or scoped_plugins:
+            if scoped_plugins:
                 all_presets.extend(vst3_presets.discover_vst3_presets(
                     scoped_plugins, refresh=refresh,
-                    plugin_scoped=bool(plugin),
+                    plugin_scoped=True,
                 )["presets"])
-        if plugin_type in {"all", "lv2"}:
+        if (plugin_type in {"all", "lv2"}
+                and not (plugin_type == "all" and vst3_identity_query)):
             lv2_index = lv2_mod.discover_lv2(refresh=refresh)
             plugin_by_uri = {item["uri"]: item for item in lv2_index["plugins"]}
             for item in lv2_index["presets"]:

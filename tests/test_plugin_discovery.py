@@ -313,7 +313,7 @@ def test_plugin_filtered_preset_tool_indexes_only_matching_vst3_records(monkeypa
     monkeypatch.setattr(vst3_presets, "discover_vst3_presets", discover)
 
     result = json.loads(_run_tool(server.list_plugin_presets(
-        "vst3", plugin="Zebralette3", limit=200,
+        plugin="Zebralette3", plugin_type="vst3", limit=200,
     )))
 
     assert authorized_queries == ["Zebralette3"]
@@ -341,7 +341,7 @@ def test_plugin_filtered_all_search_preserves_matching_lv2_results(monkeypatch):
     })
 
     result = json.loads(_run_tool(server.list_plugin_presets(
-        "all", plugin="Zebralette3", limit=200,
+        plugin="Zebralette3", plugin_type="all", limit=200,
     )))
 
     assert result["total"] == 2
@@ -415,6 +415,21 @@ def test_lv2_manifest_and_referenced_rdf_expose_plugins_ports_and_presets(tmp_pa
     assert preset["tags"] == ["pad", "warm"]
     assert preset["port_values"] == {"gain": 0.75}
     assert preset["loadable"] is True
+
+
+def test_lv2_user_local_bundle_root_is_discovered_without_lv2_path(tmp_path, monkeypatch):
+    user_lv2_root = tmp_path / ".lv2"
+    _fixture_lv2_bundle(user_lv2_root)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(lv2.sys, "platform", "linux")
+    monkeypatch.delenv("LV2_PATH", raising=False)
+    assert user_lv2_root in lv2.standard_lv2_dirs()
+    monkeypatch.setattr(lv2, "standard_lv2_dirs", lambda: [user_lv2_root])
+
+    index = lv2.discover_lv2(refresh=True)
+
+    assert [item["uri"] for item in index["plugins"]] == [PLUGIN_URI]
+    assert [item["plugin_uri"] for item in index["presets"]] == [PLUGIN_URI]
 
 
 def test_lv2_path_and_cache_invalidation_on_preset_edit(tmp_path, monkeypatch):
@@ -581,10 +596,11 @@ def test_vst3_preset_tool_embeds_component_state_in_project(tmp_path, monkeypatc
     state_node = project.root.find(".//vst3instrument/state")
     assert base64.b64decode(state_node.text) == state
     assert project.modified
-    listed = json.loads(_run_tool(server.list_plugin_presets("vst3", "Fixture Synth")))
+    listed = json.loads(_run_tool(server.list_plugin_presets(
+        plugin="Fixture Synth", plugin_type="vst3")))
     assert "state" not in listed["presets"][0]
     filtered = json.loads(_run_tool(server.list_plugin_presets(
-        "vst3", plugin="Fixture Synth", query="warm", bank="Factory",
+        plugin="Fixture Synth", plugin_type="vst3", query="warm", bank="Factory",
         category="pads", tags="soft", author="ada", character="wide",
         origin="factory")))
     assert filtered["total"] == 1
@@ -688,11 +704,22 @@ def test_native_plugin_and_preset_tools_filter_and_refresh(tmp_path, monkeypatch
     assert plugins["count"] == 1
     assert plugins["plugins"][0]["uri"] == PLUGIN_URI
     presets = json.loads(_run_tool(server.list_plugin_presets(
-        "lv2", plugin=PLUGIN_URI, tags="warm", author="ada")))
+        plugin=PLUGIN_URI, plugin_type="lv2", tags="warm", author="ada")))
     assert presets["total"] == 1
     assert presets["presets"][0]["name"] == "Warm Pad"
     refreshed = json.loads(_run_tool(server.refresh_native_plugin_discovery()))
     assert refreshed["lv2_presets"] == 1
+
+
+def test_plugin_preset_search_requires_a_plugin_filter(monkeypatch):
+    monkeypatch.setattr(server, "_authorized_vst3_plugins",
+                        lambda *_args, **_kwargs: pytest.fail("must validate before discovery"))
+    monkeypatch.setattr(lv2, "discover_lv2",
+                        lambda **_kwargs: pytest.fail("must validate before discovery"))
+
+    result = json.loads(_run_tool(server.list_plugin_presets(plugin=" ")))
+
+    assert "plugin is required" in result["error"]
 
 
 def test_lv2_model_values_validate_control_symbols():
