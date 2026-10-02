@@ -24,6 +24,7 @@ from . import vst3 as vst3_mod
 from . import vst3_probe
 from . import vst3_presets
 from . import xml_parser
+from .path_safety import resolved_path_within
 from .models import (
     NOTE_NAMES,
     TICKS_PER_BAR,
@@ -1466,6 +1467,118 @@ def _client_supports_plugin_elicitation(ctx: Context | None) -> bool:
             or getattr(elicitation, "url", None) is None)
 
 
+def _plugin_query_matches(value: str, query: str) -> bool:
+    query = query.strip().casefold()
+    value = str(value or "").casefold()
+    if not query:
+        return True
+    if query in value:
+        return True
+    normalized_query = "".join(char for char in query if char.isalnum())
+    normalized_value = "".join(char for char in value if char.isalnum())
+    return bool(normalized_query and normalized_query in normalized_value)
+
+
+def _record_matches_plugin_query(record: dict, query: str) -> bool:
+    return any(_plugin_query_matches(record.get(key, ""), query)
+               for key in ("name", "uri", "module", "bundle", "cid"))
+
+
+def _narrow_vst3_bundles(bundles: list[Path], query: str) -> list[Path]:
+    """Use a recognizable bundle name/path to avoid unrelated plugin prompts."""
+    query = query.strip()
+    if not query:
+        return bundles
+    if vst3_mod.is_valid_cid(query):
+        return []
+    requested_path = Path(query).expanduser()
+    if requested_path.suffix.lower() == ".vst3" and requested_path.exists():
+        return [requested_path.resolve()]
+    requested_name = requested_path.name
+    if requested_name.casefold().endswith(".vst3"):
+        requested_name = requested_name[:-5]
+    normalized_query = "".join(char for char in requested_name.casefold()
+                               if char.isalnum())
+    if not normalized_query:
+        return []
+    return [bundle for bundle in bundles
+            if normalized_query in "".join(
+                   char for char in bundle.stem.casefold() if char.isalnum())]
+
+
+def _targeted_vst3_bundles(query: str) -> list[Path]:
+    """Resolve a filtered query without recursively enumerating VST3 roots."""
+    query = query.strip()
+    if not query:
+        return vst3_mod.find_vst3_bundles()
+
+    requested_path = Path(query).expanduser()
+    if requested_path.suffix.lower() == ".vst3" and requested_path.exists():
+        return [requested_path.resolve()]
+
+    normalized_query = "".join(
+        char for char in requested_path.stem.casefold() if char.isalnum()
+    )
+    bundles: dict[str, Path] = {}
+    if normalized_query and not vst3_mod.is_valid_cid(query):
+        roots = [Path(raw_root).expanduser()
+                 for raw_root in vst3_mod.effective_search_paths()]
+        # The common exact-name case checks just one candidate per configured
+        # root, rather than enumerating even the root's immediate contents.
+        for root in roots:
+            if root.suffix.lower() == ".vst3":
+                candidate = root
+            else:
+                candidate = root / f"{requested_path.stem}.vst3"
+            if normalized_query != "".join(
+                    char for char in candidate.stem.casefold() if char.isalnum()):
+                continue
+            try:
+                resolved = (candidate.resolve(strict=True) if root.suffix.lower() == ".vst3"
+                            else resolved_path_within(candidate, root))
+                if resolved is not None and resolved.is_dir():
+                    bundles[str(resolved)] = resolved
+            except (OSError, RuntimeError):
+                continue
+
+        # For partial names, inspect only immediate entries in configured
+        # plugin roots; never descend through unrelated bundle/catalog trees.
+        if not bundles:
+            for root in roots:
+                if root.suffix.lower() == ".vst3":
+                    candidates = [root] if normalized_query in "".join(
+                        char for char in root.stem.casefold() if char.isalnum()) else []
+                else:
+                    try:
+                        candidates = []
+                        for index, entry in enumerate(root.iterdir()):
+                            if index >= getattr(vst3_mod, "_MAX_DISCOVERY_ENTRIES", 100_000):
+                                break
+                            if (entry.suffix.lower() == ".vst3"
+                                    and normalized_query in "".join(
+                                        char for char in entry.stem.casefold()
+                                        if char.isalnum())):
+                                candidates.append(entry)
+                    except (OSError, RuntimeError):
+                        candidates = []
+                for candidate in candidates:
+                    try:
+                        resolved = (candidate.resolve(strict=True)
+                                    if candidate == root
+                                    else resolved_path_within(candidate, root))
+                        if resolved is not None and resolved.is_dir():
+                            bundles[str(resolved)] = resolved
+                    except (OSError, RuntimeError):
+                        continue
+
+    # A plugin's displayed class name need not resemble its bundle name. Use
+    # already-approved probe metadata as a safe, no-execution lookup in that
+    # case; never probe the whole catalog merely to resolve a product name.
+    for module in plugin_permissions.cached_probe_modules(query):
+        bundles.setdefault(module, Path(module))
+    return [bundles[key] for key in sorted(bundles)]
+
+
 async def _authorized_vst3_plugins(
     ctx: Context | None,
     action: str,
@@ -1473,9 +1586,22 @@ async def _authorized_vst3_plugins(
     *,
     refresh: bool = False,
     bundles: list[Path] | None = None,
+    plugin_query: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Probe only binaries with a matching cached result or explicit consent."""
-    bundles = vst3_mod.find_vst3_bundles() if bundles is None else bundles
+    if bundles is None:
+        bundles = (_targeted_vst3_bundles(plugin_query) if plugin_query
+                   else vst3_mod.find_vst3_bundles())
+    elif plugin_query:
+        bundles = _narrow_vst3_bundles(bundles, plugin_query)
+    if plugin_query and not bundles:
+        return [], [{
+            "module": plugin_query,
+            "reason": (
+                "No VST3 bundle name or cached descriptor safely matches this filter; "
+                "use the exact bundle path or omit the plugin filter for global discovery"
+            ),
+        }]
     approved: dict[str, plugin_permissions.PluginIdentity] = {}
     denied: list[dict] = []
     can_elicit = _client_supports_plugin_elicitation(ctx)
@@ -1788,8 +1914,8 @@ async def inspect_native_plugin(
 
 @mcp.tool()
 async def list_plugin_presets(
+    plugin: str,
     plugin_type: str = "all",
-    plugin: str = "",
     query: str = "",
     bank: str = "",
     category: str = "",
@@ -1805,8 +1931,8 @@ async def list_plugin_presets(
     """Search installed VST3 and RDF-declared LV2 presets, including factory banks.
 
     Args:
+        plugin: Required plugin name, LV2 URI, VST3 module path or class CID
         plugin_type: ``all``, ``vst3`` or ``lv2``
-        plugin: Optional plugin name, LV2 URI, VST3 module path or class CID
         query: Case-insensitive preset-name search
         bank: Filter by bank
         category: Filter by category
@@ -1818,6 +1944,9 @@ async def list_plugin_presets(
         limit: Maximum results (1-1000)
         refresh: Force a filesystem rescan
     """
+    plugin = plugin.strip()
+    if not plugin:
+        return json.dumps({"error": "plugin is required; pass a plugin name, URI, module path, or CID"})
     plugin_type = plugin_type.strip().lower()
     if plugin_type not in {"all", "vst3", "lv2"}:
         return json.dumps({"error": "plugin_type must be 'all', 'vst3', or 'lv2'"})
@@ -1826,7 +1955,11 @@ async def list_plugin_presets(
         limit = min(1000, max(1, int(limit)))
         all_presets: list[dict] = []
         denied_plugins: list[dict] = []
-        if plugin_type in {"all", "vst3"}:
+        lv2_uri_query = plugin.casefold().startswith(("http://", "https://"))
+        vst3_identity_query = (Path(plugin).suffix.lower() == ".vst3"
+                               or vst3_mod.is_valid_cid(plugin))
+        if (plugin_type in {"all", "vst3"}
+                and not (plugin_type == "all" and lv2_uri_query)):
             call_args = {
                 "plugin_type": plugin_type, "plugin": plugin, "query": query,
                 "bank": bank, "category": category, "tags": tags, "author": author,
@@ -1835,10 +1968,18 @@ async def list_plugin_presets(
             }
             plugins, denied_plugins = await _authorized_vst3_plugins(
                 ctx, "list_plugin_presets", call_args, refresh=refresh,
+                plugin_query=plugin if plugin_type in {"all", "vst3"} else "",
             )
-            all_presets.extend(vst3_presets.discover_vst3_presets(
-                plugins, refresh=refresh)["presets"])
-        if plugin_type in {"all", "lv2"}:
+            scoped_plugins = ([record for record in plugins
+                               if _record_matches_plugin_query(record, plugin)]
+                              if plugin else plugins)
+            if scoped_plugins:
+                all_presets.extend(vst3_presets.discover_vst3_presets(
+                    scoped_plugins, refresh=refresh,
+                    plugin_scoped=True,
+                )["presets"])
+        if (plugin_type in {"all", "lv2"}
+                and not (plugin_type == "all" and vst3_identity_query)):
             lv2_index = lv2_mod.discover_lv2(refresh=refresh)
             plugin_by_uri = {item["uri"]: item for item in lv2_index["plugins"]}
             for item in lv2_index["presets"]:
@@ -1852,9 +1993,8 @@ async def list_plugin_presets(
         return json.dumps({"error": f"Preset discovery failed: {exc}"})
 
     if plugin:
-        needle = plugin.casefold()
         all_presets = [item for item in all_presets if any(
-            needle in str(item.get(key) or "").casefold()
+            _plugin_query_matches(item.get(key, ""), plugin)
             for key in ("plugin_name", "plugin_uri", "plugin_module", "plugin_cid"))]
 
     def contains(item: dict, key: str, needle: str) -> bool:
