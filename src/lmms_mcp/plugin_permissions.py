@@ -204,6 +204,36 @@ def cached_probe(identity: PluginIdentity) -> dict | None:
     return None
 
 
+def cached_probe_modules(query: str) -> list[str]:
+    """Find bundle paths from already-probed metadata without probing others."""
+    normalized_query = "".join(char for char in query.casefold() if char.isalnum())
+    if not normalized_query:
+        return []
+    with _lock:
+        results = list(_probe_results.values())
+    modules: set[str] = set()
+    for result in results:
+        module = str(result.get("module", ""))
+        classes = result.get("classes")
+        # Match plugin identity fields, not an arbitrary parent directory or
+        # vendor label that could fan a query out to an entire plugin catalog.
+        candidates = [Path(module).stem]
+        if isinstance(classes, list):
+            candidates.extend(
+                str(item.get(field, ""))
+                for item in classes if isinstance(item, dict)
+                for field in ("name", "cid")
+            )
+        for candidate in candidates:
+            normalized_candidate = "".join(
+                char for char in candidate.casefold() if char.isalnum()
+            )
+            if normalized_query in normalized_candidate:
+                modules.add(module)
+                break
+    return sorted(modules)
+
+
 def cache_probe(identity: PluginIdentity, result: dict) -> None:
     if result.get("error") or not isinstance(result.get("classes"), list):
         return

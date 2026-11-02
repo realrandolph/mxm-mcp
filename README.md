@@ -220,12 +220,25 @@ names survive. MXM currently compiles its VST3 host for Linux and Windows;
 Native VST3 and LV2 discovery reads installed bundles and RDF/filesystem
 metadata directly; it never starts the MXM GUI. VST3 scans include the usual
 platform paths and `$VST3_PATH`; LV2 scans include the standard bundle roots
-and `$LV2_PATH`. `list_plugin_presets` indexes `.vstpreset` component state,
-filesystem-based u-he `.h2p` banks (including Zebralette 3's installed banks),
-and LV2 `pset:Preset` RDF. `$VST3_PRESET_PATH` and `$UHE_PRESET_PATH` add preset
-roots. Factory/user origin and optional metadata are reported only when
-available. Refresh after installing or updating plugins/presets; indexes
-otherwise reuse filesystem-identity-checked cached results.
+and `$LV2_PATH`. VST3 preset search follows Steinberg's platform-specific
+user/shared preset roots and company/plugin subdirectories, u-he preset directories
+(`~/.u-he`, `~/Documents/u-he`), with `$VST3_PRESET_PATH` and `$UHE_PRESET_PATH`
+as optional additional roots. It indexes standard `.vstpreset` component state and
+u-he `.h2p` presets; LV2 presets are discovered from `pset:Preset` RDF in LV2
+bundles. Factory/user origin and optional metadata are reported only when available.
+Refresh after installing or updating plugins/presets; indexes otherwise reuse
+filesystem-identity-checked cached results persisted to disk at
+`$XDG_CACHE_HOME/lmms-mcp/discovery-cache.json` (`~/.cache/lmms-mcp/discovery-cache.json`)
+or `%LOCALAPPDATA%/lmms-mcp/discovery-cache.json` on Windows across server runs.
+`list_plugin_presets` requires a `plugin` value and returns presets only for
+that plugin; there is no unfiltered/global preset search. Use the plugin name,
+LV2 URI, VST3 `module` bundle path, or VST3 `cid` from
+`list_native_plugins`/`list_vst3_instruments`. Passing the VST3 `module` path is
+most reliable; a `cid` also resolves when its descriptor was probed earlier in
+the same server process. Name-filtered VST3 searches avoid recursively scanning
+the entire VST3 catalog or prompting for unrelated plugins. `plugin_type="all"`
+searches the specified plugin across VST3 and LV2; specify `vst3` or `lv2` to
+limit the format. `limit` controls returned pagination, not discovery work.
 
 VST3 factory probing executes third-party module code in a separate process.
 Before the first probe of each binary, the server requests per-plugin consent
@@ -243,10 +256,10 @@ and network permissions. The trust file is
 `%APPDATA%/lmms-mcp/native-plugin-permissions.json` on Windows; remove an entry
 there to revoke a permanent decision.
 
-`load_native_plugin_preset` embeds VST3 component chunks or LV2 input-control
-port values into the MMP project. Preset formats without a known compatible
-project-state representation are listed but marked non-loadable; opaque state
-is not reverse-engineered or left dependent on the original preset file. VST3
+`load_native_plugin_preset` embeds VST3 component chunks, u-he `.h2p` streams, or
+LV2 input-control port values into the MMP project. Preset formats without a known
+compatible project-state representation are listed but marked non-loadable; opaque
+state is not reverse-engineered or left dependent on the original preset file. VST3
 presets with separate controller/unknown state chunks are marked non-loadable
 until the MMP host representation can preserve those chunks too.
 
