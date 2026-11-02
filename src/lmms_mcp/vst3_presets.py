@@ -15,6 +15,7 @@ from . import vst3
 from .path_safety import resolved_path_within
 
 _VST3_EXTENSIONS = {".vstpreset"}
+_UHE_EXTENSIONS = {".h2p", ".uhe-preset"}
 _CLASS_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _INVALID_PRESET_PATH_CHARS = re.compile(r'[\\/*?:"<>|\x00]')
 _MAX_CHUNKS = 256
@@ -66,7 +67,7 @@ def preset_search_paths(
         # roots. Search common product/vendor subdirectories and paths adjacent
         # to each selected bundle instead. Explicit preset roots remain honored
         # as configured: they are user-selected search locations.
-        explicit_roots = _path_entries("VST3_PRESET_PATH")
+        explicit_roots = _path_entries("VST3_PRESET_PATH") + _path_entries("UHE_PRESET_PATH")
         bases = standard_preset_dirs() + explicit_roots
         paths: list[Path] = list(explicit_roots)
         for plugin in plugins:
@@ -83,7 +84,29 @@ def preset_search_paths(
             paths.extend([
                 bundle / "Contents/Resources/Presets",
                 bundle / "Presets",
+                bundle.parent / f"{name}.data/Presets",
+                bundle.parent / f"{name}.data/UserPresets",
+                bundle.parent / name / "Presets",
+                bundle.parent / name / "UserPresets",
+                Path.home() / ".u-he" / name / "Presets",
+                Path.home() / ".u-he" / name / "UserPresets",
+                Path.home() / "Documents/u-he" / f"{name}.data/Presets",
+                Path.home() / "Documents/u-he" / f"{name}.data/UserPresets",
+                Path.home() / ".local/share/u-he" / name / "Presets",
+                Path("/usr/share/u-he") / name / "Presets",
+                Path("/usr/local/share/u-he") / name / "Presets",
             ])
+            # Inspect bundle binary link if it resolves to an external data tree (e.g. ~/.u-he/Zebralette3)
+            try:
+                for candidate in bundle.glob("Contents/*/*"):
+                    if candidate.is_symlink():
+                        target_dir = candidate.resolve().parent
+                        paths.extend([
+                            target_dir / "Presets",
+                            target_dir / "UserPresets",
+                        ])
+            except (OSError, RuntimeError):
+                pass
             for base in bases:
                 for product in product_names:
                     if company:
@@ -94,17 +117,27 @@ def preset_search_paths(
     else:
         paths = standard_preset_dirs()
         paths += _path_entries("VST3_PRESET_PATH")
+        paths += _path_entries("UHE_PRESET_PATH")
         # VST3_PATH is also a useful preset root: many vendors keep Presets or
         # <Plugin>.data banks beside their installed bundles.
         paths += _path_entries("VST3_PATH")
         paths += vst3.standard_vst3_dirs()
         for plugin in plugins:
             bundle = Path(plugin.get("module", ""))
+            name = str(plugin.get("name", "")).strip()
             if not bundle:
                 continue
             paths.extend([
                 bundle / "Contents/Resources/Presets",
                 bundle / "Presets",
+                bundle.parent / f"{name}.data/Presets",
+                bundle.parent / f"{name}.data/UserPresets",
+                bundle.parent / name / "Presets",
+                bundle.parent / name / "UserPresets",
+                Path.home() / ".u-he" / name / "Presets",
+                Path.home() / ".u-he" / name / "UserPresets",
+                Path.home() / "Documents/u-he" / f"{name}.data/Presets",
+                Path.home() / "Documents/u-he" / f"{name}.data/UserPresets",
             ])
     unique: list[Path] = []
     seen: set[str] = set()
@@ -164,7 +197,7 @@ def _collect_files(roots: list[Path]) -> list[Path]:
                         continue
                 else:
                     resolved = entry
-                if resolved.is_file() and entry.suffix.lower() in _VST3_EXTENSIONS:
+                if resolved.is_file() and entry.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
                     add_file(resolved)
                 elif resolved.is_dir() and (
                         not entry.is_symlink() or entry.suffix.lower() == ".vst3"):
@@ -179,7 +212,7 @@ def _collect_files(roots: list[Path]) -> list[Path]:
             continue
         if resolved_root.is_dir():
             walk(resolved_root, resolved_root)
-        elif resolved_root.is_file() and root.suffix.lower() in _VST3_EXTENSIONS:
+        elif resolved_root.is_file() and root.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
             add_file(resolved_root)
         if scanned > _MAX_PRESET_SCAN_ENTRIES or len(found) >= _MAX_PRESET_FILES:
             break
@@ -288,9 +321,62 @@ def parse_vstpreset(path: str | Path, *, include_state: bool = False) -> dict:
     return result
 
 
+def parse_h2p(path: str | Path, *, include_state: bool = False) -> dict:
+    """Read u-he preset metadata and optionally base64-encode its raw state stream."""
+    preset_path = Path(path)
+    info: dict = {"format": "h2p", "loadable": False}
+    try:
+        size = preset_path.stat().st_size
+        if size > _MAX_COMPONENT_BYTES:
+            return {**info, "error": "preset exceeds maximum component size"}
+        raw_bytes = preset_path.read_bytes()
+        text = raw_bytes[:16384].decode("utf-8", "ignore")
+        metadata: dict[str, str] = {}
+        meta_match = re.search(r"/\*@Meta(.*?)\*/", text, re.DOTALL)
+        if meta_match:
+            for m in re.finditer(r"([A-Za-z0-9_-]+):\s*'([^']*)'", meta_match.group(1)):
+                metadata[m.group(1).casefold()] = m.group(2)
+        target_match = re.search(r"^#AM=([^\r\n]+)", text, re.MULTILINE)
+        target_plugin = target_match.group(1).strip() if target_match else None
+
+        name = preset_path.stem
+        category = metadata.get("categories") or preset_path.parent.name or None
+        if category and ":" in category:
+            category = category.split(",", 1)[0].strip()
+        result = {
+            **info,
+            "name": name,
+            "target_plugin": target_plugin,
+            "metadata": metadata,
+            "category": category,
+            "loadable": True,
+            "state_chunks": ["h2p"],
+            "requires_controller_state": False,
+            "unsupported_state_chunks": [],
+        }
+        if include_state:
+            result["state"] = base64.b64encode(raw_bytes).decode("ascii")
+        return result
+    except OSError as exc:
+        return {**info, "error": f"could not read preset: {exc}"}
+
+
 def _associate_preset(preset: dict, plugins: list[dict], path: Path) -> dict:
     cid = str(preset.get("cid", "")).upper()
     plugin = next((item for item in plugins if item.get("cid", "").upper() == cid), None)
+    if plugin is None and path.suffix.lower() in _UHE_EXTENSIONS:
+        target_name = (preset.get("target_plugin") or "").casefold()
+        path_str = str(path).casefold()
+        for item in plugins:
+            if not item.get("is_instrument"):
+                continue
+            item_name = str(item.get("name", "")).casefold()
+            bundle_name = Path(item.get("module", "")).stem.casefold()
+            if (target_name and (target_name == item_name or target_name == bundle_name)) or (
+                item_name and item_name in path_str
+            ) or (bundle_name and bundle_name in path_str):
+                plugin = item
+                break
     metadata = preset.get("metadata", {})
     name = preset.get("name") or path.stem
     tags = sorted({tag.strip() for key, value in metadata.items()
@@ -336,7 +422,12 @@ def discover_vst3_presets(
     def build() -> dict:
         presets: list[dict] = []
         for path in _collect_files(paths):
-            parsed = parse_vstpreset(path)
+            if path.suffix.lower() == ".vstpreset":
+                parsed = parse_vstpreset(path)
+            elif path.suffix.lower() in _UHE_EXTENSIONS:
+                parsed = parse_h2p(path)
+            else:
+                continue
             record = _associate_preset(parsed, plugins, path)
             presets.append(record)
         presets.sort(key=lambda item: (str(item.get("plugin_name") or "").casefold(),
@@ -354,23 +445,29 @@ def discover_vst3_presets(
 
 
 def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str | None:
-    """Read at most one selected component chunk, after rechecking its root and CID."""
+    """Read at most one selected component chunk or h2p stream, after rechecking its root and CID."""
     source = preset.get("source")
     if not source or not preset.get("loadable") or preset.get("requires_controller_state"):
         return None
     safe_path = next((resolved for root in search_paths
                       if (resolved := resolved_path_within(source, root)) is not None), None)
-    if safe_path is None or safe_path.suffix.lower() != ".vstpreset":
+    if safe_path is None:
         return None
-    # This is deliberately the only path that asks the parser to retain state:
-    # one selected file, capped at _MAX_COMPONENT_BYTES (32 MiB).
-    parsed = parse_vstpreset(safe_path, include_state=True)
-    if (not parsed.get("loadable")
-            or parsed.get("cid", "").upper() != str(preset.get("plugin_cid", "")).upper()
-            or parsed.get("requires_controller_state")
-            or parsed.get("unsupported_state_chunks")):
-        return None
-    return parsed.get("state")
+    suffix = safe_path.suffix.lower()
+    if suffix == ".vstpreset":
+        parsed = parse_vstpreset(safe_path, include_state=True)
+        if (not parsed.get("loadable")
+                or parsed.get("cid", "").upper() != str(preset.get("plugin_cid", "")).upper()
+                or parsed.get("requires_controller_state")
+                or parsed.get("unsupported_state_chunks")):
+            return None
+        return parsed.get("state")
+    elif suffix in _UHE_EXTENSIONS:
+        parsed = parse_h2p(safe_path, include_state=True)
+        if not parsed.get("loadable"):
+            return None
+        return parsed.get("state")
+    return None
 
 
 def preset_matches_plugin(preset: dict, *, module: str = "", cid: str = "") -> bool:

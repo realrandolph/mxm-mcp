@@ -20,7 +20,14 @@ PRESET_URI = "https://example.test/presets/warm-pad"
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
+def clear_cache(tmp_path_factory, monkeypatch):
+    # Keep the persisted discovery cache in its own temporary tree so a test
+    # run never reads or rewrites the developer's real cache file. It must sit
+    # outside tmp_path: several tests fingerprint tmp_path itself, and writing
+    # the cache inside a fingerprinted root would invalidate it every call.
+    cache_root = tmp_path_factory.mktemp("discovery-cache")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root / "xdg"))
+    monkeypatch.setenv("LOCALAPPDATA", str(cache_root / "local-appdata"))
     discovery_cache.clear_discovery_cache()
     yield
     discovery_cache.clear_discovery_cache()
@@ -227,14 +234,14 @@ def test_vst3_user_and_factory_preset_banks_are_indexed(
     user = root / "User" / "Leads"
     _write_vstpreset(factory / "Factory Lead.vstpreset")
     _write_vstpreset(user / "User Lead.vstpreset", cid="CD" * 16)
-    (user / "Legacy.h2p").write_text("vendor-specific opaque bank")
+    (user / "Legacy.h2p").write_text("/*@Meta\nBank: 'User'\n*/\n#AM=Fixture Synth\n")
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
                         lambda plugins=None, **kwargs: [root])
     plugin = _vst3_plugin(tmp_path / "Fixture Synth.vst3")
     presets = vst3_presets.discover_vst3_presets([plugin], refresh=True)["presets"]
-    assert len(presets) == 2
+    assert len(presets) == 3
     assert {item["origin"] for item in presets} == {"factory", "user"}
-    assert {item["format"] for item in presets} == {"vstpreset"}
+    assert {item["format"] for item in presets} == {"vstpreset", "h2p"}
 
 
 def test_vst3_preset_roots_follow_vendor_and_product_directory_layout(tmp_path, monkeypatch):
@@ -259,6 +266,7 @@ def test_plugin_scoped_vst3_preset_search_uses_plugin_roots_only(tmp_path, monke
     _write_vstpreset(target_root / "Factory" / "Warm Pad.vstpreset")
     _write_vstpreset(other_root / "Factory" / "Other.vstpreset")
     plugin = {**_vst3_plugin(target_bundle), "name": "Zebralette3", "vendor": "u-he"}
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
     monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [search_root])
     monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
     for variable in ("VST3_PRESET_PATH", "VST3_PATH"):
@@ -281,6 +289,7 @@ def test_plugin_scoped_vst3_search_honors_explicit_flat_preset_roots(tmp_path, m
     configured_root = tmp_path / "custom-preset-root"
     _write_vstpreset(configured_root / "Factory Pad.vstpreset")
     plugin = {**_vst3_plugin(bundle), "name": "Zebralette3", "vendor": "u-he"}
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
     monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [])
     monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
     monkeypatch.setenv("VST3_PRESET_PATH", str(configured_root))
@@ -524,6 +533,199 @@ def test_discovery_cache_bounds_plugin_scoped_index_entries(monkeypatch):
     assert "vst3.presets.plugin.0" not in discovery_cache._entries
 
 
+def test_discovery_cache_path_follows_platform_conventions(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(discovery_cache.sys, "platform", "linux")
+    assert discovery_cache.cache_file_path() == (
+        home / ".cache" / "lmms-mcp" / "discovery-cache.json")
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    assert discovery_cache.cache_file_path() == (
+        tmp_path / "xdg-cache" / "lmms-mcp" / "discovery-cache.json")
+
+    monkeypatch.setattr(discovery_cache.sys, "platform", "win32")
+    assert discovery_cache.cache_file_path() == (
+        home / ".cache" / "lmms-mcp" / "discovery-cache.json")
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-appdata"))
+    assert discovery_cache.cache_file_path() == (
+        tmp_path / "local-appdata" / "lmms-mcp" / "discovery-cache.json")
+
+
+def test_discovery_cache_survives_a_restart_and_reuses_the_index(tmp_path):
+    root = tmp_path / "lv2"
+    bundle = root / "Fixture.lv2"
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.ttl").write_text("first")
+    calls = []
+
+    def discover():
+        calls.append(len(calls))
+        return {"plugins": [{"uri": PLUGIN_URI}], "presets": []}
+
+    first = discovery_cache.cached_discovery("lv2.index", [root], discover)
+    assert calls == [0]
+    cache_file = discovery_cache.cache_file_path()
+    assert cache_file.is_file()
+    assert json.loads(cache_file.read_text())["version"] == (
+        discovery_cache._CACHE_FORMAT_VERSION)
+
+    discovery_cache._entries.clear()  # simulate a fresh server process
+    reloaded = discovery_cache.cached_discovery("lv2.index", [root], discover)
+    assert reloaded == first
+    assert calls == [0]
+
+    # A restart keeps other keys' entries when a new key is added.
+    discovery_cache._entries.clear()
+    discovery_cache.cached_discovery(
+        "vst3.presets.plugin.other", [root], lambda: {"presets": []})
+    payload = json.loads(cache_file.read_text())
+    assert [entry["key"] for entry in payload["entries"]] == [
+        "lv2.index", "vst3.presets.plugin.other"]
+
+
+def test_discovery_cache_disk_entry_invalidates_on_filesystem_change(tmp_path):
+    root = tmp_path / "lv2"
+    bundle = root / "Fixture.lv2"
+    bundle.mkdir(parents=True)
+    manifest = bundle / "manifest.ttl"
+    manifest.write_text("first")
+    calls = []
+
+    def discover():
+        calls.append(len(calls) + 1)
+        return {"builds": len(calls)}
+
+    first = discovery_cache.cached_discovery("lv2.index", [root], discover)
+    assert first == {"builds": 1}
+    discovery_cache._entries.clear()
+    assert discovery_cache.cached_discovery("lv2.index", [root], discover) == first
+    assert calls == [1]
+
+    manifest.write_text("a longer replacement payload")
+    after = discovery_cache.cached_discovery("lv2.index", [root], discover)
+    assert after == {"builds": 2}
+    assert calls == [1, 2]
+
+    # The refreshed value is persisted for the next restart.
+    discovery_cache._entries.clear()
+    assert discovery_cache.cached_discovery("lv2.index", [root], discover) == after
+    assert calls == [1, 2]
+
+
+def test_discovery_cache_persists_symlink_fingerprint_rows(tmp_path):
+    root = tmp_path / "lv2"
+    bundle = root / "Fixture.lv2"
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.ttl").write_text("first")
+    (root / "alias.lv2").symlink_to(bundle, target_is_directory=True)
+    snapshot = discovery_cache.filesystem_fingerprint([root])
+    assert any(row[1:] == ("symlink", str(bundle)) for row in snapshot)
+    calls = []
+
+    def discover():
+        calls.append(len(calls))
+        return {"plugins": []}
+
+    discovery_cache.cached_discovery("lv2.index", [root], discover)
+    discovery_cache._entries.clear()
+    assert discovery_cache.cached_discovery("lv2.index", [root], discover) == {
+        "plugins": []}
+    assert calls == [0]
+
+
+def test_discovery_cache_resets_corrupt_cache_files(tmp_path):
+    cache_file = discovery_cache.cache_file_path()
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("{ this is not json")
+    value = discovery_cache.cached_discovery("lv2.index", [], lambda: {"plugins": ["a"]})
+    assert value == {"plugins": ["a"]}
+    payload = json.loads(cache_file.read_text())
+    assert payload["version"] == discovery_cache._CACHE_FORMAT_VERSION
+    assert [entry["key"] for entry in payload["entries"]] == ["lv2.index"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"version": 999, "entries": []},
+    {"version": 1, "entries": "not-a-list"},
+    {"version": 1, "entries": [{"key": 3, "fingerprint": [], "value": {}}]},
+    {"version": 1, "entries": [{"key": "k", "fingerprint": [["path", True]],
+                                "value": {}}]},
+    {"version": 1, "entries": [{"key": "k", "fingerprint": "flat", "value": {}}]},
+])
+def test_discovery_cache_ignores_invalid_cache_payloads(tmp_path, payload):
+    cache_file = discovery_cache.cache_file_path()
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps(payload))
+    calls = []
+
+    def discover():
+        calls.append(len(calls))
+        return {"rebuilt": True}
+
+    assert discovery_cache.cached_discovery("k", [], discover) == {"rebuilt": True}
+    assert calls == [0]
+
+
+def test_discovery_cache_keeps_unserializable_values_in_memory():
+    value = {"callback": object()}
+    calls = []
+
+    def discover():
+        calls.append(len(calls))
+        return value
+
+    assert discovery_cache.cached_discovery("k", [], discover) is value
+    assert discovery_cache.cached_discovery("k", [], discover) is value
+    assert calls == [0]
+    assert not discovery_cache.cache_file_path().exists()
+
+
+def test_discovery_cache_writes_atomically_without_temporary_files():
+    for index in range(3):
+        discovery_cache.cached_discovery(
+            f"key.{index}", [], lambda index=index: {"index": index})
+
+    cache_file = discovery_cache.cache_file_path()
+    assert sorted(path.name for path in cache_file.parent.iterdir()) == [
+        cache_file.name]
+    payload = json.loads(cache_file.read_text())
+    assert [entry["key"] for entry in payload["entries"]] == [
+        "key.0", "key.1", "key.2"]
+    assert [entry["value"] for entry in payload["entries"]] == [
+        {"index": 0}, {"index": 1}, {"index": 2}]
+
+
+def test_discovery_cache_bounds_persisted_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr(discovery_cache, "_MAX_CACHE_ENTRIES", 2)
+    for index in range(4):
+        discovery_cache.cached_discovery(
+            f"key.{index}", [], lambda index=index: {"index": index})
+
+    payload = json.loads(discovery_cache.cache_file_path().read_text())
+    assert [entry["key"] for entry in payload["entries"]] == ["key.2", "key.3"]
+    assert list(discovery_cache._entries) == ["key.2", "key.3"]
+
+
+def test_clear_discovery_cache_removes_disk_entries():
+    discovery_cache.cached_discovery("first", [], lambda: 1)
+    discovery_cache.cached_discovery("second", [], lambda: 2)
+    cache_file = discovery_cache.cache_file_path()
+
+    discovery_cache.clear_discovery_cache("first")
+    payload = json.loads(cache_file.read_text())
+    assert [entry["key"] for entry in payload["entries"]] == ["second"]
+    assert "first" not in discovery_cache._entries
+
+    discovery_cache.clear_discovery_cache()
+    assert not cache_file.exists()
+    assert not discovery_cache._entries
+
+
 def test_lv2_mixed_valid_and_malformed_port_state_is_not_loadable(tmp_path, monkeypatch):
     root = tmp_path / "lv2"
     _, preset_path = _fixture_lv2_bundle(root)
@@ -720,6 +922,72 @@ def test_plugin_preset_search_requires_a_plugin_filter(monkeypatch):
     result = json.loads(_run_tool(server.list_plugin_presets(plugin=" ")))
 
     assert "plugin is required" in result["error"]
+
+
+def test_uhe_h2p_preset_discovery_and_state_embedding(tmp_path, monkeypatch):
+    bundle = tmp_path / "plugins" / "Zebralette3.vst3"
+    bundle.mkdir(parents=True)
+    plugin = {**_vst3_plugin(bundle), "name": "Zebralette3", "vendor": "u-he"}
+
+    preset_dir = tmp_path / "u-he" / "Zebralette3" / "Presets" / "Factory"
+    preset_dir.mkdir(parents=True)
+    h2p_file = preset_dir / "Cosmic Lead.h2p"
+    h2p_content = (
+        "/*@Meta\n"
+        "Bank: 'Factory Bank'\n"
+        "Author: 'Sound Designer'\n"
+        "Categories: 'Leads:Synth, Plucks'\n"
+        "Features: 'Poly, Modulated'\n"
+        "Character: 'Bright'\n"
+        "*/\n"
+        "#AM=Zebralette3\n"
+        "#cm=main\n"
+        "Cutoff=75.00\n"
+        "// Section for ugly compressed binary Data\n"
+        "$$$$282420\n"
+        "dummy_payload=12345\n\x00\x00"
+    )
+    h2p_file.write_bytes(h2p_content.encode("utf-8"))
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+    monkeypatch.setenv("UHE_PRESET_PATH", str(preset_dir.parent))
+    monkeypatch.setattr(vst3_presets, "standard_preset_dirs", lambda: [])
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [])
+
+    index = vst3_presets.discover_vst3_presets([plugin], plugin_scoped=True, refresh=True)
+    presets = index["presets"]
+    assert len(presets) == 1
+    preset = presets[0]
+    assert preset["name"] == "Cosmic Lead"
+    assert preset["format"] == "h2p"
+    assert preset["bank"] == "Factory Bank"
+    assert preset["author"] == "Sound Designer"
+    assert preset["category"] == "Leads:Synth"
+    assert "Poly" in preset["tags"]
+    assert preset["character"] == "Bright"
+    assert preset["loadable"] is True
+    assert preset["plugin_name"] == "Zebralette3"
+    assert preset["plugin_cid"] == CID
+
+    project, track = _new_project(xml_parser.NATIVE_VST3_HOST)
+    xml_parser.configure_native_vst3_instrument(track, plugin["module"], CID)
+    server.set_project(project)
+
+    async def authorize(*_args, **_kwargs):
+        return [plugin], []
+
+    monkeypatch.setattr(server, "_authorized_vst3_plugins", authorize)
+
+    res = json.loads(_run_tool(server.load_native_plugin_preset(0, str(h2p_file))))
+    assert "embedded" in res, f"Expected embedded, got error: {res}"
+    assert res["embedded"] is True
+    assert res["preset"] == "Cosmic Lead"
+
+    state_node = project.root.find(".//vst3instrument/state")
+    assert state_node is not None
+    assert state_node.get("encoding") == "base64"
+    embedded_bytes = base64.b64decode(state_node.text)
+    assert embedded_bytes == h2p_content.encode("utf-8")
 
 
 def test_lv2_model_values_validate_control_symbols():

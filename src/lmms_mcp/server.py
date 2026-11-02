@@ -2052,8 +2052,17 @@ async def load_native_plugin_preset(
             call_args = {"track_index": track_index, "preset": preset}
             plugin_records, _denied = await _authorized_vst3_plugins(
                 ctx, "load_native_plugin_preset", call_args,
+                plugin_query=module or cid,
             )
-            vst3_index = vst3_presets.discover_vst3_presets(plugin_records)
+            scoped_records = [
+                record for record in plugin_records
+                if (not module or record.get("module") == module)
+                and (not cid or record.get("cid", "").casefold() == cid.casefold())
+            ]
+            records_to_use = scoped_records or plugin_records
+            vst3_index = vst3_presets.discover_vst3_presets(
+                records_to_use, plugin_scoped=True,
+            )
             indexed = vst3_index["presets"]
             requested = Path(preset).expanduser()
             requested_source = str(requested.resolve()) if requested.exists() else preset
