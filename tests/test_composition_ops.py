@@ -373,3 +373,51 @@ class TestAutomationOps:
         assert note_tuples(loaded.root, 0) == note_tuples(project.root, 0)
         assert get_arrangement(loaded.root) == get_arrangement(project.root)
         assert loaded.root.find(".//automationpattern/time") is not None
+
+    def test_place_chord_velocity_panning(self, song):
+        plan = place_chord(
+            song, 1,
+            {"symbol": "C4maj", "volume": 140, "panning": -50, "at": 0, "length": 192},
+            apply=True,
+        )["plan"]
+        notes = plan["occurrences"][0]["notes"]
+        assert all(n["volume"] == 140 for n in notes)
+        assert all(n["panning"] == -50 for n in notes)
+
+    def test_edit_automation_no_ops_is_noop(self, song):
+        add_automation_batch(song, [AUTOMATION_SPEC], apply=True)
+        plan = edit_automation(song, curve_index=0, ops=None, apply=False)["plan"]
+        assert [(p["pos"], p["value"]) for p in plan["points"]] == [
+            (0, 100.0), (384, 150.0), (768, 120.0),
+        ]
+
+    def test_edit_automation_preserves_unmentioned_points(self, song):
+        add_automation_batch(song, [AUTOMATION_SPEC], apply=True)
+        plan = edit_automation(song, curve_index=0, ops=[{"time_shift_ticks": 192}], apply=False)["plan"]
+        assert [(p["pos"], p["value"]) for p in plan["points"]] == [
+            (192, 100.0), (576, 150.0), (960, 120.0),
+        ]
+
+    @pytest.mark.parametrize("ops,expected", [
+        ([{"scale": 0.5}], [50.0, 75.0, 60.0]),
+        ([{"offset": 10.0}], [110.0, 160.0, 130.0]),
+        ([{"clamp": [0.0, 120.0]}], [100.0, 120.0, 120.0]),
+        ([{"scale": 2.0}, {"offset": -50.0}], [150.0, 250.0, 190.0]),
+    ])
+    def test_automation_value_transforms(self, song, ops, expected):
+        add_automation_batch(song, [AUTOMATION_SPEC], apply=True)
+        plan = edit_automation(song, curve_index=0, ops=ops, apply=False)["plan"]
+        assert [p["value"] for p in plan["points"]] == expected
+
+    def test_edit_notes_clip_relative_filtering(self, song):
+        place_phrase(song, 0, PHRASE_A, at_bars=4, apply=True)
+        # Edit notes with transpose +5 and velocity scale
+        res = edit_notes(
+            song, track_index=0, pattern_index=0,
+            transforms={"transpose": 5, "velocity_scale": 1.2},
+            filter_keys=[36],
+            apply=True,
+        )
+        assert res["ok"] is True
+        assert res["plan"]["notes_matched"] == 2
+        assert all(n["key"] == 41 for n in res["plan"]["notes"])

@@ -629,3 +629,39 @@ class TestInvariants:
         once = quantize_notes(notes, grid_ticks=12)
         assert quantize_notes(once, grid_ticks=12) == once
         assert all(n["pos"] % 12 == 0 for n in once)
+
+
+class TestGapRegressions:
+    def test_slash_bass_is_lowest(self):
+        spec = parse_chord_symbol("C4maj/B4")
+        pitches = chord_pitches(spec)
+        assert pitches[0] == 71  # B4 is lowest
+        assert pitches == [71, 72, 76, 79]
+
+    def test_chord_spec_velocity_panning(self):
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_chord_spec({"symbol": "C4maj", "volume": 250, "at": 0, "length": 48})
+        assert exc.value.code == "INVALID_VELOCITY"
+
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_chord_spec({"symbol": "C4maj", "panning": -150, "at": 0, "length": 48})
+        assert exc.value.code == "INVALID_PANNING"
+
+    def test_rhythm_velocity_panning_length(self):
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_rhythm_pattern({"steps": 16, "hits": [{"step": 0, "drum": "kick", "length_steps": 0}]})
+        assert exc.value.code == "INVALID_TIME"
+
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_rhythm_pattern({"steps": 16, "hits": [{"step": 0, "drum": "kick", "velocity": 999}]})
+        assert exc.value.code == "INVALID_VELOCITY"
+
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_rhythm_pattern({"steps": 16, "hits": [{"step": 0, "drum": "kick", "panning": 105}]})
+        assert exc.value.code == "INVALID_PANNING"
+
+    def test_phrase_key_and_pitch_rejected(self):
+        with pytest.raises(MusicalUnitError) as exc:
+            parse_phrase({"notes": [{"key": 60, "pitch": "D4", "pos": 0, "length": 48}]})
+        assert exc.value.code == "INVALID_PITCH"
+
