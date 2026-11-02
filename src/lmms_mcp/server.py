@@ -24,6 +24,8 @@ from . import vst3 as vst3_mod
 from . import vst3_probe
 from . import vst3_presets
 from . import xml_parser
+from . import composition
+from .musical_units import MusicalUnitError
 from .path_safety import resolved_path_within
 from .models import (
     NOTE_NAMES,
@@ -2902,6 +2904,442 @@ def generate_scale(
         "notes": notes,
         "count": len(notes),
     })
+
+
+# ──────────────────────────────────────────────────────────────────
+# DETERMINISTIC MUSICAL-UNIT COMPOSITION & EDITING (ISSUE #11)
+# ──────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def add_phrase(
+    track_index: int,
+    phrase: dict,
+    at_ticks: int | None = None,
+    at_bars: float | None = None,
+    repeat: int = 1,
+    spacing_bars: float | None = None,
+    spacing_ticks: int | None = None,
+    transforms: dict | None = None,
+    clip_name: str | None = None,
+    clip_len_ticks: int | None = None,
+    fit: str = "extend",
+    link: bool = False,
+    pattern_index: int | None = None,
+    apply: bool = True,
+) -> str:
+    """Place a musical motif/phrase on an instrument track with exact timing and transforms.
+
+    Args:
+        track_index: Track index (must be an instrument track).
+        phrase: Phrase dict containing 'notes' list (each note with key, pos, length, volume, panning).
+        at_ticks: Song timeline start position in ticks (192 = 1 bar in 4/4).
+        at_bars: Song timeline start position in bars (4/4 time).
+        repeat: Number of times to repeat the phrase.
+        spacing_bars: Spacing interval between repetitions in bars.
+        spacing_ticks: Spacing interval between repetitions in ticks.
+        transforms: Dict mapping occurrence index (0..repeat-1) to per-occurrence transforms.
+        clip_name: Name for the placed arrangement clip.
+        clip_len_ticks: Optional explicit clip window length.
+        fit: How to fit notes into clip window: 'extend', 'truncate', or 'error'.
+        link: Reject if True (linked patterns not supported on instrument tracks).
+        pattern_index: Optional pattern index if writing into an existing pattern.
+        apply: If True, mutates project. If False, returns identical execution plan without mutating.
+    """
+    proj = get_project()
+    try:
+        # Convert string keys in transforms if passed via JSON
+        parsed_transforms = None
+        if transforms:
+            parsed_transforms = {int(k): v for k, v in transforms.items()}
+        res = composition.place_phrase(
+            project=proj,
+            track_index=track_index,
+            phrase=phrase,
+            at_ticks=at_ticks,
+            at_bars=at_bars,
+            repeat=repeat,
+            spacing_bars=spacing_bars,
+            spacing_ticks=spacing_ticks,
+            transforms=parsed_transforms,
+            clip_name=clip_name,
+            clip_len_ticks=clip_len_ticks,
+            fit=fit,
+            link=link,
+            pattern_index=pattern_index,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def add_chord(
+    track_index: int,
+    symbol: str | None = None,
+    pitches: list | None = None,
+    at: int | None = None,
+    at_ticks: int | None = None,
+    at_bars: float | None = None,
+    length: int | None = None,
+    length_ticks: int | None = None,
+    length_bars: float | None = None,
+    volume: int = 100,
+    panning: int = 0,
+    repeat: int = 1,
+    spacing_bars: float | None = None,
+    spacing_ticks: int | None = None,
+    inversion: int = 0,
+    voicing: str = "close",
+    octave_shift: int = 0,
+    transforms: dict | None = None,
+    clip_name: str | None = None,
+    apply: bool = True,
+) -> str:
+    """Place a chord with all constituent notes sounding together.
+
+    Args:
+        track_index: Track index (must be an instrument track).
+        symbol: Standard chord symbol with octave (e.g. 'C4maj', 'A3min7', 'F#4dim', 'G47/B4').
+        pitches: Explicit pitch list (e.g. [60, 64, 67] or ['C4', 'E4', 'G4']).
+        at: Start position in ticks.
+        at_ticks: Start position in ticks.
+        at_bars: Start position in bars.
+        length: Chord duration in ticks.
+        length_ticks: Chord duration in ticks.
+        length_bars: Chord duration in bars.
+        volume: Note velocity (0-200).
+        panning: Note panning (-100 to 100).
+        repeat: Repetition count.
+        spacing_bars: Spacing interval between repetitions in bars.
+        spacing_ticks: Spacing interval between repetitions in ticks.
+        inversion: Inversion number (0 = root position).
+        voicing: Voicing style ('close', 'drop2', 'drop3').
+        octave_shift: Octave transpose offset.
+        transforms: Per-occurrence transforms dict.
+        clip_name: Optional clip name.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        # Resolve start position
+        if at is not None:
+            if at < 0:
+                raise MusicalUnitError("Position cannot be negative", code="NEGATIVE_TIME", value=at)
+            resolved_at_ticks = at
+            resolved_at_bars = None
+        elif at_ticks is not None:
+            resolved_at_ticks = at_ticks
+            resolved_at_bars = None
+        elif at_bars is not None:
+            resolved_at_ticks = None
+            resolved_at_bars = at_bars
+        else:
+            resolved_at_ticks = 0
+            resolved_at_bars = None
+
+        # Resolve duration
+        if length is not None:
+            if length <= 0:
+                raise MusicalUnitError("Chord duration must be > 0", code="INVALID_TIME", value=length)
+            resolved_len = length
+        elif length_ticks is not None:
+            if length_ticks <= 0:
+                raise MusicalUnitError("Chord duration must be > 0", code="INVALID_TIME", value=length_ticks)
+            resolved_len = length_ticks
+        elif length_bars is not None:
+            resolved_len = bars_to_ticks(length_bars)
+        else:
+            resolved_len = 192
+
+        chord_payload: dict[str, Any] = {
+            "at": resolved_at_ticks if resolved_at_ticks is not None else 0,
+            "length": resolved_len,
+            "volume": volume,
+            "panning": panning,
+            "inversion": inversion,
+            "voicing": voicing,
+            "octave_shift": octave_shift,
+        }
+        if symbol is not None:
+            chord_payload["symbol"] = symbol
+        if pitches is not None:
+            chord_payload["pitches"] = pitches
+
+        parsed_transforms = None
+        if transforms:
+            parsed_transforms = {int(k): v for k, v in transforms.items()}
+
+        res = composition.place_chord(
+            project=proj,
+            track_index=track_index,
+            chord=chord_payload,
+            at_ticks=resolved_at_ticks,
+            at_bars=resolved_at_bars,
+            repeat=repeat,
+            spacing_bars=spacing_bars,
+            spacing_ticks=spacing_ticks,
+            transforms=parsed_transforms,
+            clip_name=clip_name,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def add_progression(
+    track_index: int,
+    progression: dict,
+    at_ticks: int | None = None,
+    at_bars: float | None = None,
+    repeat: int = 1,
+    spacing_bars: float | None = None,
+    spacing_ticks: int | None = None,
+    transforms: dict | None = None,
+    layout: str = "sequential",
+    apply: bool = True,
+) -> str:
+    """Place an ordered sequence of explicit chord events as a progression.
+
+    Args:
+        track_index: Track index (must be an instrument track).
+        progression: Dict with 'chords' list (each chord with symbol/pitches and bars or at).
+        at_ticks: Start timeline position in ticks.
+        at_bars: Start timeline position in bars.
+        repeat: Repetition count.
+        spacing_bars: Spacing interval between repetitions in bars.
+        spacing_ticks: Spacing interval between repetitions in ticks.
+        transforms: Dict mapping occurrence index to transforms.
+        layout: 'sequential' (default) or 'absolute'.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        parsed_transforms = None
+        if transforms:
+            parsed_transforms = {int(k): v for k, v in transforms.items()}
+        res = composition.place_progression(
+            project=proj,
+            track_index=track_index,
+            progression=progression,
+            at_ticks=at_ticks,
+            at_bars=at_bars,
+            repeat=repeat,
+            spacing_bars=spacing_bars,
+            spacing_ticks=spacing_ticks,
+            transforms=parsed_transforms,
+            layout=layout,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def add_rhythm(
+    track_index: int,
+    rhythm: dict,
+    at_ticks: int | None = None,
+    at_bars: float | None = None,
+    repeat: int = 1,
+    spacing_bars: float | None = None,
+    spacing_ticks: int | None = None,
+    target: str = "instrument",
+    transforms: dict | None = None,
+    clip_name: str | None = None,
+    apply: bool = True,
+) -> str:
+    """Place a rhythmic pattern on an instrument track or Beat/Bassline pattern track.
+
+    Args:
+        track_index: Track index (instrument track or pattern track).
+        rhythm: Dict with 'steps' (int) and 'hits' list (each hit with step, drum/pitch, velocity).
+        at_ticks: Start timeline position in ticks.
+        at_bars: Start timeline position in bars.
+        repeat: Repetition count.
+        spacing_bars: Spacing interval between repetitions in bars.
+        spacing_ticks: Spacing interval between repetitions in ticks.
+        target: 'instrument' (default) or 'bb' (places on Beat/Bassline track with shared pattern).
+        transforms: Dict mapping occurrence index to transforms.
+        clip_name: Name for the clip.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        parsed_transforms = None
+        if transforms:
+            parsed_transforms = {int(k): v for k, v in transforms.items()}
+        res = composition.place_rhythm(
+            project=proj,
+            track_index=track_index,
+            rhythm=rhythm,
+            at_ticks=at_ticks,
+            at_bars=at_bars,
+            repeat=repeat,
+            spacing_bars=spacing_bars,
+            spacing_ticks=spacing_ticks,
+            target=target,
+            transforms=parsed_transforms,
+            clip_name=clip_name,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def arrange_musical_units(
+    placements: list[dict],
+    apply: bool = True,
+) -> str:
+    """Batch arrange musical units (phrases, chords, progressions, rhythms) across tracks and sections.
+
+    Args:
+        placements: List of placement specs (each with type, track_index, and unit spec).
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        res = composition.arrange_units(
+            project=proj,
+            placements=placements,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def edit_notes_batch(
+    track_index: int,
+    pattern_index: int | None = None,
+    transpose: int = 0,
+    time_shift: int = 0,
+    stretch: float = 1.0,
+    reverse: bool = False,
+    quantize: int | None = None,
+    velocity_scale: float = 1.0,
+    velocity_offset: int = 0,
+    filter_keys: list[int] | None = None,
+    filter_time_range: list[int] | None = None,
+    apply: bool = True,
+) -> str:
+    """Batch transform notes in an existing track pattern.
+
+    Args:
+        track_index: Track index.
+        pattern_index: Pattern index on track (default: all patterns).
+        transpose: Semitones delta.
+        time_shift: Ticks delta.
+        stretch: Time stretch multiplier.
+        reverse: True to reverse notes within clip.
+        quantize: Quantize grid in ticks.
+        velocity_scale: Velocity multiplier.
+        velocity_offset: Velocity integer offset.
+        filter_keys: Optional list of MIDI keys to filter.
+        filter_time_range: Optional [start_ticks, end_ticks] range filter.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        transforms = {
+            "transpose": transpose,
+            "time_shift": time_shift,
+            "stretch": stretch,
+            "reverse": reverse,
+            "quantize": quantize,
+            "velocity_scale": velocity_scale,
+            "velocity_offset": velocity_offset,
+        }
+        res = composition.edit_notes(
+            project=proj,
+            track_index=track_index,
+            pattern_index=pattern_index,
+            transforms=transforms,
+            filter_keys=filter_keys,
+            filter_time_range=tuple(filter_time_range) if filter_time_range else None,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def add_automation_batch(
+    curves: list[dict],
+    on_out_of_range: str = "clamp",
+    apply: bool = True,
+) -> str:
+    """Batch create automation curves with validation and preview/apply parity.
+
+    Args:
+        curves: List of curve specs (each with target_type, param, points, optional target_index, name, smooth).
+        on_out_of_range: 'clamp' (default) or 'error'.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        res = composition.add_automation_batch(
+            project=proj,
+            curves=curves,
+            on_out_of_range=on_out_of_range,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
+
+
+@mcp.tool()
+def edit_automation(
+    curve_index: int = 0,
+    ops: list[dict] | None = None,
+    dedupe: str = "last_wins",
+    apply: bool = True,
+) -> str:
+    """Edit points of an existing automation track.
+
+    Args:
+        curve_index: Automation track index (0-based among automation tracks).
+        ops: List of edit operations (e.g. [{'set': [...]}, {'time_shift_ticks': 192}]).
+        dedupe: 'last_wins' (default) or 'error'.
+        apply: Preview (False) or apply (True).
+    """
+    proj = get_project()
+    try:
+        res = composition.edit_automation(
+            project=proj,
+            curve_index=curve_index,
+            ops=ops,
+            dedupe=dedupe,
+            apply=apply,
+        )
+        return json.dumps(res)
+    except MusicalUnitError as exc:
+        return json.dumps(exc.to_dict())
+    except (ValueError, IndexError) as exc:
+        return json.dumps({"ok": False, "error": str(exc), "code": "INVALID_ARGUMENT"})
 
 
 # ──────────────────────────────────────────────────────────────────

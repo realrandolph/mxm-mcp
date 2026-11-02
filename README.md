@@ -115,8 +115,23 @@ python -m lmms_mcp
 | Tool | Description |
 |------|-------------|
 | `add_note` | Add a note by MIDI key number |
-| `add_note_by_name` | Add a note by name (e.g. "C4", "A#3") |
+| `add_note_by_name` | Add a note by name (e.g. "C4", "A#3", "Bb2") |
 | `add_notes_batch` | Add multiple notes at once |
+
+### Musical Unit Composition & Deterministic Editing
+
+Deterministic, AI-decision-free musical manipulation primitives with preview/apply parity:
+
+| Tool | Description |
+|------|-------------|
+| `add_phrase` | Place and repeat motifs/phrases with exact per-occurrence transforms (transpose, stretch, reverse, quantize, velocity) |
+| `add_chord` | Place chords via explicit pitches or deterministic symbols (e.g. `C4maj`, `A3min7/G3`, inversions, drop2/drop3 voicings) |
+| `add_progression` | Place sequential or absolute chord progressions across timeline bars/ticks |
+| `add_rhythm` | Place rhythmic patterns from step grids or hit lists on instrument or Beat/Bassline tracks |
+| `arrange_musical_units` | Batch arrange phrases, chords, progressions, and rhythms across song sections |
+| `edit_notes_batch` | Batch transform existing notes with key/time-range filters, transpose, time-shift, stretch, reverse, quantize |
+| `add_automation_batch` | Batch create parameter curves (tempo, volume, panning, pitch) with validation and clamp/error policies |
+| `edit_automation` | Transform, scale, shift, clamp, reverse, or replace points on existing automation curves |
 
 ### Mixer
 

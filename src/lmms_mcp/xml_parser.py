@@ -1148,19 +1148,20 @@ AUTOMATION_TARGETS = {
 
 def add_automation_track(
     root: ET.Element,
-    name: str,
-    points: list[tuple[int, float]],
+    name: str = "Automation track",
+    points: list[tuple[int, float]] | None = None,
     target_id: int | None = None,
     progression: int = 0,
     tension: float = 1.0,
     position: int = 0,
 ) -> ET.Element:
-    """Add an automation track with a pattern (curve).
+    """Add an automation track to the project, optionally with an automation curve.
 
     Args:
         root: Project root element.
         name: Automation track/pattern name (e.g. "Volume swell").
-        points: List of (tick_position, value) tuples defining the curve.
+        points: Optional list of (tick_position, value) tuples defining the curve.
+            If omitted or None, creates an empty automation track.
         target_id: Model id to automate (from automate_attribute), or
             None for an unlinked curve.
         progression: 0=linear, 1=cubic hermite (smooth curves).
@@ -1170,9 +1171,6 @@ def add_automation_track(
     Returns:
         The created track element.
     """
-    if not points:
-        raise ValueError("At least one point is required")
-
     song = root.find("song")
     container = song.find("trackcontainer[@type='song']")
 
@@ -1183,6 +1181,11 @@ def add_automation_track(
         "solo": "0",
     })
     ET.SubElement(track, "automationtrack")
+
+    if points is not None and not points:
+        raise ValueError("At least one point is required")
+    if points is None:
+        return track
 
     max_pos = max(p[0] for p in points)
     pattern = ET.SubElement(track, "automationpattern", {
@@ -1210,6 +1213,9 @@ def add_automation_track(
         ET.SubElement(pattern, "object", {"id": str(target_id)})
 
     return track
+
+
+add_automation_curve = add_automation_track
 
 
 def resolve_automation_target(
