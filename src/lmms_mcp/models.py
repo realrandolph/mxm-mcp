@@ -173,22 +173,40 @@ def midi_to_note_name(midi_key: int) -> str:
 
 
 def note_name_to_midi(name: str) -> int:
-    """Convert a note name like 'C4', 'A#3', 'C-1' to a MIDI key number."""
+    """Convert a note name like 'C4', 'A#3', 'Bb2', 'C-1' to a MIDI key number."""
     import re
 
     name = name.strip()
-    m = re.match(r"^([A-G]#?)(-?\d+)$", name)
+    m = re.match(r"^([A-G][#b♭♯]?)(-?\d+)$", name)
     if not m:
         raise ValueError(f"Invalid note name: {name}")
 
-    note_part = m.group(1)
+    note_part = m.group(1).replace("♯", "#").replace("♭", "b")
     octave = int(m.group(2))
 
-    if note_part not in NOTE_NAMES:
+    note_map = {
+        "C": 0, "B#": 0,
+        "C#": 1, "Db": 1,
+        "D": 2,
+        "D#": 3, "Eb": 3,
+        "E": 4, "Fb": 4,
+        "F": 5, "E#": 5,
+        "F#": 6, "Gb": 6,
+        "G": 7,
+        "G#": 8, "Ab": 8,
+        "A": 9,
+        "A#": 10, "Bb": 10,
+        "B": 11, "Cb": 11,
+    }
+
+    if note_part not in note_map:
         raise ValueError(f"Invalid note: {note_part}")
 
-    note_index = NOTE_NAMES.index(note_part)
-    return (octave + 1) * 12 + note_index
+    note_index = note_map[note_part]
+    midi_key = (octave + 1) * 12 + note_index
+    if not 0 <= midi_key <= 127:
+        raise ValueError(f"Note {name} out of MIDI range (0-127): {midi_key}")
+    return midi_key
 
 
 def bars_to_ticks(bars: float, ticks_per_bar: int = TICKS_PER_BAR) -> int:
