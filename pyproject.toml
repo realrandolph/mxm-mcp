@@ -50,4 +50,5 @@ packages = ["src/lmms_mcp"]
 testpaths = ["tests"]
 markers = [
     "integration: exercises an installed MXM application and plugins",
+    "slow: exercises large arrangement or render-scale operations",
 ]
