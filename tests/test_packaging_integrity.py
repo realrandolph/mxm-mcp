@@ -69,6 +69,8 @@ def test_package_workflow_covers_requested_triggers_and_platforms() -> None:
     assert "master" in workflow
     assert '"v*"' in workflow
     assert "workflow_dispatch" in workflow
+    assert "concurrency:" in workflow
+    assert "cancel-in-progress: true" in workflow
     assert "contents: write" in workflow
     assert "runs-on: ubuntu-22.04" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -83,5 +85,7 @@ def test_package_workflow_covers_requested_triggers_and_platforms() -> None:
 def test_general_ci_discovers_harness_and_packaging_tests() -> None:
     workflow = read_text(".github/workflows/ci.yml")
 
+    assert "concurrency:" in workflow
+    assert "cancel-in-progress: true" in workflow
     assert "pytest -v -m \"not integration\" tests" in workflow
     assert (ROOT / "tests/test_harness_config.py").is_file()

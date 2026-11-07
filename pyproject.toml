@@ -1,6 +1,6 @@
 [project]
 name = "mxm-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP Server for MXM - AI-powered music production with MXM"
 readme = "README.md"
 license = "MIT"
