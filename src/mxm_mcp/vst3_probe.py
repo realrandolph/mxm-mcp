@@ -74,6 +74,7 @@ _IID_UNIT_INFO = _iid_words(0x3D4BD6B5, 0x913A4FD2, 0xA886E768, 0xA5EB92C1)
 _IID_BSTREAM = _iid_words(0xC3BF6EA2, 0x30994752, 0x9B6BF990, 0x1EE33E9B)
 _IID_CONNECTION_POINT = _iid_words(0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D8D1)
 _IID_AUDIO_PROCESSOR = _iid_words(0x42043F99, 0xB7DA453C, 0xA569E79D, 0x9AAEC33D)
+_IID_HOST_APPLICATION = _iid_words(0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5)
 
 #! ParameterInfo::ParameterFlags
 _PARAM_CAN_AUTOMATE = 1 << 0
@@ -272,10 +273,11 @@ def _release(handle) -> None:
     _bind(handle, 2, ctypes.c_uint32, (ctypes.c_void_p,))(_address(handle))
 
 
-def _initialize(handle) -> int:
-    """IPluginBase::initialize (vtable slot 3) with no host application context."""
+def _initialize(handle, context=None) -> int:
+    """IPluginBase::initialize (vtable slot 3), optionally with a host context."""
     return _bind(handle, 3, ctypes.c_int32,
-                 (ctypes.c_void_p, ctypes.c_void_p))(_address(handle), None)
+                 (ctypes.c_void_p, ctypes.c_void_p))(
+                     _address(handle), context if context is not None else None)
 
 
 def _terminate(handle) -> None:
@@ -484,6 +486,57 @@ class _ComponentHandler:
     @staticmethod
     def _restart_component(_this, _flags):
         return _RESULT_OK
+
+
+class _HostApplication:
+    """A minimal ``IHostApplication`` so plugins that require one initialize.
+
+    u-he instruments dereference the context passed to ``initialize``; a null
+    pointer crashes them. Headless probing needs only the host name.
+    """
+
+    def __init__(self, name: str = "MXM-MCP") -> None:
+        self.name = name
+        callbacks = [
+            _FUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p,
+                      ctypes.POINTER(ctypes.c_void_p))(self._query_interface),
+            _FUNCTYPE(ctypes.c_uint32, ctypes.c_void_p)(lambda _this: 1),
+            _FUNCTYPE(ctypes.c_uint32, ctypes.c_void_p)(lambda _this: 0),
+            _FUNCTYPE(ctypes.c_int32, ctypes.c_void_p,
+                      ctypes.POINTER(ctypes.c_uint16))(self._get_name),
+            _FUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                      ctypes.POINTER(ctypes.c_void_p))(self._create_instance),
+        ]
+        self._callbacks = callbacks
+        self._vtable = (ctypes.c_void_p * len(callbacks))(
+            *(ctypes.cast(callback, ctypes.c_void_p) for callback in callbacks))
+        self._object = _PInterface(ctypes.cast(self._vtable, ctypes.c_void_p))
+        self.pointer = ctypes.c_void_p(ctypes.addressof(self._object))
+
+    def _query_interface(self, _this, iid, target):
+        if not target:
+            return _NO_INTERFACE
+        requested = ctypes.string_at(iid, 16) if iid else b""
+        if requested in (self._iid, _IID_UNKNOWN):
+            target[0] = ctypes.c_void_p(ctypes.addressof(self._object))
+            return _RESULT_OK
+        target[0] = None
+        return _NO_INTERFACE
+
+    _iid = _IID_HOST_APPLICATION
+
+    def _get_name(self, _this, buffer):
+        if buffer:
+            raw = self.name.encode("utf-16-le")[:2 * (_STRING128 - 1)]
+            raw = raw[:len(raw) - (len(raw) % 2)]
+            ctypes.memmove(buffer, raw + b"\x00\x00", len(raw) + 2)
+        return _RESULT_OK
+
+    @staticmethod
+    def _create_instance(_this, _cid, _iid, target):
+        if target:
+            target[0] = None
+        return _NO_INTERFACE
 
 
 class _ParamValueQueue:
@@ -962,10 +1015,12 @@ def _parameter_records(controller) -> list[dict]:
 class _PluginSession:
     """One created component/controller pair, with the calls the probe needs."""
 
-    def __init__(self, component, controller, description: dict) -> None:
+    def __init__(self, component, controller, description: dict,
+                 host: _HostApplication | None = None) -> None:
         self.component = component
         self.controller = controller
         self.description = description
+        self.host = host
         self.class_cid = str(description.get("cid", "")).upper()
         self.class_name = str(description.get("name", ""))
         self.handler = _ComponentHandler() if controller else None
@@ -1035,11 +1090,11 @@ def _open_session(factory, classes: list[dict], cid: str = "") -> _PluginSession
     if controller is None:
         # Single-component classes implement both interfaces on one class id.
         controller = _create_instance(factory, raw_cid, _IID_EDIT_CONTROLLER)
-    session = _PluginSession(component, controller, description)
+    session = _PluginSession(component, controller, description, _HostApplication())
     if component is not None:
-        _initialize(component)
+        _initialize(component, session.host.pointer)
     if controller is not None:
-        _initialize(controller)
+        _initialize(controller, session.host.pointer)
         set_handler = _bind(controller, 16, ctypes.c_int32,
                             (ctypes.c_void_p, ctypes.c_void_p))
         set_handler(_address(controller), session.handler.pointer)
