@@ -308,7 +308,7 @@ fi
 
 CONFIGURED_NAMES=()
 if [ "${#SELECTED[@]}" -gt 0 ]; then
-    CONFIGURE_ARGS=(configure --binary "${TARGET}")
+    CONFIGURE_ARGS=(configure --binary "${TARGET}" --detected-only)
     for harness in "${SELECTED[@]}"; do
         case "${harness}" in
             opencode) CONFIGURE_ARGS+=(--opencode); CONFIGURED_NAMES+=("OpenCode") ;;
