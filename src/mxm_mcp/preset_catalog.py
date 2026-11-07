@@ -102,25 +102,26 @@ def _is_uhe(plugin: dict, key: str) -> bool:
 
 def _surge_dirs(key: str, platform: str, environ: dict[str, str],
                 home: Path) -> list[Path]:
-    if platform == "darwin":
-        root = Path("/Library/Application Support/Surge XT")
-    elif platform == "win32":
-        root = _program_data(environ) / "Surge XT"
-    else:
-        root = _existing_or(Path("/usr/share/surge-xt"),
-                            Path("/usr/local/share/surge-xt"))
     if "surge" not in key:
         return []
+    if platform == "darwin":
+        roots = [Path("/Library/Application Support/Surge XT")]
+    elif platform == "win32":
+        roots = [_program_data(environ) / "Surge XT"]
+    else:
+        roots = [Path("/usr/share/surge-xt"), Path("/usr/local/share/surge-xt")]
+
+    dirs = []
     if "effect" in key or key.endswith("fx"):
-        return [
-            root / "fx_presets",
-            home / "Documents/Surge XT/FX Presets",
-        ]
-    return [
-        root / "patches_factory",
-        root / "patches_3rdparty",
-        home / "Documents/Surge XT/Patches",
-    ]
+        for root in roots:
+            dirs.append(root / "fx_presets")
+        dirs.append(home / "Documents/Surge XT/FX Presets")
+    else:
+        for root in roots:
+            dirs.append(root / "patches_factory")
+            dirs.append(root / "patches_3rdparty")
+        dirs.append(home / "Documents/Surge XT/Patches")
+    return dirs
 
 
 def _vital_dirs(key: str, home: Path) -> list[Path]:

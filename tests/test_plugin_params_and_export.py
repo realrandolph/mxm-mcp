@@ -588,6 +588,41 @@ class TestProbePrimitives:
 
 # ---- probe CLI -----------------------------------------------------------------------------
 
+class TestProbeConversions:
+    def test_text_to_value_returns_the_plugin_conversion(self, monkeypatch):
+        captured = {}
+
+        def fake(bundle, **options):
+            captured.update({"bundle": bundle, **options})
+            return {"module": str(bundle), "class": {"cid": "AB"},
+                    "text_queries": [{"id": 1, "text": "800 Hz", "normalized": 0.5,
+                                      "plain": 800.0, "display": "800 Hz"}],
+                    "value_queries": []}
+
+        monkeypatch.setattr(vst3_probe, "inspect_bundle_parameters", fake)
+        result = vst3_probe.text_to_value("/x.vst3", 1, "800 Hz")
+        assert result["normalized"] == 0.5 and result["plain"] == 800.0
+        assert result["class"] == {"cid": "AB"}
+        assert captured["text_queries"] == [(1, "800 Hz")]
+
+    def test_value_to_text_returns_the_display_string(self, monkeypatch):
+        def fake(bundle, **options):
+            return {"module": str(bundle), "class": None, "text_queries": [],
+                    "value_queries": [{"id": 1, "normalized": 0.5,
+                                       "text": "800 Hz", "units": "Hz"}]}
+
+        monkeypatch.setattr(vst3_probe, "inspect_bundle_parameters", fake)
+        result = vst3_probe.value_to_text("/x.vst3", 1, 0.5)
+        assert result["text"] == "800 Hz" and result["units"] == "Hz"
+
+    def test_conversion_errors_are_passed_through(self, monkeypatch):
+        monkeypatch.setattr(
+            vst3_probe, "inspect_bundle_parameters",
+            lambda bundle, **options: {"module": str(bundle), "error": "boom"})
+        assert vst3_probe.text_to_value("/x.vst3", 1, "800 Hz")["error"] == "boom"
+        assert vst3_probe.value_to_text("/x.vst3", 1, 0.5)["error"] == "boom"
+
+
 class TestProbeCli:
     def test_params_mode_prints_the_inspection_json(self, monkeypatch, capsys):
         captured = {}
