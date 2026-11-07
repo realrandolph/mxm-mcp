@@ -1,0 +1,153 @@
+name: MXM MCP Packages
+
+on:
+  push:
+    branches:
+      - master
+      - feat/package-mxm-mcp-14
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package-linux:
+    name: Package Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: latest
+
+      - name: Install project dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Build Linux package
+        run: bash scripts/build_linux_package.sh
+
+      - name: Verify archive executable permissions
+        run: |
+          python - <<'PY'
+          import tarfile
+          from pathlib import Path
+
+          archive = Path("dist/mxm-mcp-linux-x86_64.tar.gz")
+          package = "mxm-mcp-linux-x86_64"
+          required = {
+              f"{package}/install.sh": 0o755,
+              f"{package}/mxm-mcp": 0o755,
+          }
+          with tarfile.open(archive, "r:gz") as tar:
+              entries = {member.name: member for member in tar.getmembers()}
+          for name, expected_mode in required.items():
+              if name not in entries:
+                  raise SystemExit(f"Archive is missing {name}")
+              actual_mode = entries[name].mode & 0o777
+              if actual_mode != expected_mode:
+                  raise SystemExit(
+                      f"{name} has mode {actual_mode:04o}; expected {expected_mode:04o}"
+                  )
+          print(f"Verified executable modes in {archive}")
+          PY
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mxm-mcp-linux-x86_64
+          path: dist/mxm-mcp-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    name: Package Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: latest
+
+      - name: Install project dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows setup package
+        run: uv run --with pyinstaller python scripts/build_windows_package.py
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mxm-mcp-setup-windows-x64
+          path: dist/mxm-mcp-setup-windows-x64.exe
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Release Packages
+    needs: [package-linux, package-windows]
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download Linux package
+        uses: actions/download-artifact@v4
+        with:
+          name: mxm-mcp-linux-x86_64
+          path: dist
+
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: mxm-mcp-setup-windows-x64
+          path: dist
+
+      - name: Create or update GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ github.ref_name }}"
+          if [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            VERSION=$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+            RELEASE_TAG="v${VERSION}"
+          fi
+
+          echo "Publishing release ${RELEASE_TAG}..."
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Updating existing release ${RELEASE_TAG}..."
+            gh release upload "${RELEASE_TAG}" \
+              dist/mxm-mcp-linux-x86_64.tar.gz \
+              dist/mxm-mcp-setup-windows-x64.exe \
+              --clobber
+          else
+            echo "Creating new release ${RELEASE_TAG}..."
+            gh release create "${RELEASE_TAG}" \
+              dist/mxm-mcp-linux-x86_64.tar.gz \
+              dist/mxm-mcp-setup-windows-x64.exe \
+              --title "MXM MCP ${RELEASE_TAG}" \
+              --generate-notes \
+              --latest
+          fi
