@@ -1,130 +1,185 @@
-# LMMS MCP Server
+# MXM MCP Server
 
-An MCP (Model Context Protocol) server for [LMMS](https://lmms.io/) - the free, open-source digital audio workstation. Lets AI agents create, modify, and save LMMS music projects programmatically.
+An MCP (Model Context Protocol) server for [MXM](https://github.com/realrandolph/mxm) — the modern, cross-platform digital audio workstation. Enables AI agents to compose, edit, arrange, automate, sound-design, and inspect MXM music projects programmatically.
+
+---
 
 ## Features
 
-- **Create & save** LMMS projects (`.mmpz` compressed, `.mmp` XML)
-- **Add tracks**: Instrument, Sample, Pattern (Beat/Bassline), Automation
-- **Talking Bass**: `add_talking_bass_track` (native `lv2instrument`; `make -C plugins/talkingbass install`)
-- **AFP samples**: `set_audiofileprocessor_sample` for MIDI one-shots
-- **Mixer routing**: `set_track_mixer_channel` (sample tracks write `mixch`)
-- **Add notes** with MIDI key, position, velocity, and panning
-- **Effects**: 18 built-in effects on tracks and mixer channels (delay, reverb, EQ, compressor...)
-- **ZynAddSubFX presets**: Load any of ~950 factory instruments (.xiz), tune parameters
-- **Arrangement**: Place patterns, BB clips and audio clips on the song timeline
-- **Automation**: Tempo ramps, volume swells, panning curves - linked to real LMMS models
-- **Mixer control**: Create channels, set volume, name channels
-- **Song settings**: Tempo (BPM), time signature, master volume/pitch
-- **Musical utilities**: Note name conversion, scale generation, tick/bar conversion
-- **Full project inspection**: Read tracks, patterns, notes, mixer channels
+- **Project Management**: Create, load, inspect, and save compressed (`.mmpz`) and XML (`.mmp`) projects.
+- **Track Types**: Instrument, Sample, Beat/Bassline Pattern, and Automation tracks.
+- **Deterministic Musical Unit Composition**:
+  - `add_phrase`: Motifs and repeating phrases with exact per-occurrence transforms (transpose, stretch, reverse, quantize, velocity).
+  - `add_chord`: Pitch lists or deterministic chord symbols (e.g. `C4maj`, `A3min7/G3`, inversions, drop-2/drop-3 voicings).
+  - `add_progression`: Sequential and absolute chord progressions across timeline bars/ticks.
+  - `add_rhythm`: Pattern generation from step grids and hit lists on instrument or Beat/Bassline tracks.
+  - `arrange_musical_units`: Batch arrangement of phrases, chords, progressions, and rhythms across song sections.
+  - `edit_notes_batch`: Batch transformations with key/time filters, transpose, time-shift, stretch, reverse, and quantize.
+  - `add_automation_batch` & `edit_automation`: Predictable parameter curve generation and modification with clamp/error policies.
+- **Native VST3 & LV2 Hosting**: Direct native hosting of Surge XT, TalkingBass, and filesystem-discovered VST3/LV2 instruments without Carla.
+- **Plugin & Preset Discovery**: Headless discovery for installed VST3 bundles and LV2 RDF metadata with persistent disk caching.
+- **Effects Chain**: 18 built-in effects on tracks and mixer channels (delay, reverb, EQ, compressor, waveshaper...).
+- **ZynAddSubFX Integration**: Browse ~950 factory presets (`.xiz`) and fine-tune synthesis parameters.
+- **Mixer & Routing**: Create channels, route tracks (`mixch`), configure sends, and set volume/panning.
+- **Headless Audio Rendering**: Export completed projects to WAV, FLAC, OGG, or MP3 via the MXM DAW engine.
+
+---
 
 ## Installation
 
-```bash
-pip install lmms-mcp
-```
+### Pre-Built Packages (Recommended)
 
-Or from source:
+Pre-built standalone installers are available from the repository [Releases](https://github.com/realrandolph/mxm-mcp/releases). They bundle the Python runtime and dependencies so no separate Python installation is required.
+
+#### Linux (Linux Mint, Ubuntu, Debian)
+1. Download `mxm-mcp-linux-x86_64.tar.gz` from the latest release.
+2. Extract the archive:
+   ```bash
+   tar -xzf mxm-mcp-linux-x86_64.tar.gz
+   cd mxm-mcp-linux-x86_64
+   ```
+3. Double-click `install.sh` in your file manager (such as Nemo or Nautilus), or run:
+   ```bash
+   ./install.sh
+   ```
+4. The installer provides a graphical Zenity wizard (with automatic terminal fallback) that:
+   - Checks for MXM DAW and links to the releases page if missing.
+   - Automatically detects installed harnesses (OpenCode, Codex, Claude).
+   - Pre-selects all detected harnesses with an option to opt out.
+   - Installs `mxm-mcp` to `~/.local/bin/mxm-mcp` and ensures it is in `PATH`.
+
+#### Windows 10+
+1. Download `mxm-mcp-setup-windows-x64.exe` from the latest release.
+2. Run the installer executable.
+3. The wizard will:
+   - Check for MXM DAW.
+   - Pre-select detected AI harnesses (OpenCode, Codex, Claude Desktop).
+   - Install to `%LOCALAPPDATA%\Programs\mxm-mcp` (per-user install, no administrator privileges required).
+   - Add the directory to the User `PATH` and register an uninstaller.
+
+---
+
+### MXM DAW Integration
+
+MXM MCP can compose, edit, arrange, and save projects completely headlessly without the DAW application installed.
+
+To render projects to audio files (WAV, FLAC, OGG, MP3), load factory ZynAddSubFX presets, or run live plugin availability checks, install the **MXM DAW** application:
+
+👉 **[Download MXM DAW Releases](https://github.com/realrandolph/mxm/releases)**
+
+---
+
+### Install from Source
+
+Requirements: Python 3.10+
 
 ```bash
-git clone https://github.com/TypeWolf/lmms-mcp.git
-cd lmms-mcp
+git clone https://github.com/realrandolph/mxm-mcp.git
+cd mxm-mcp
 pip install -e .
 ```
 
-### Requirements
+To include development and test dependencies:
+```bash
+pip install -e ".[dev]"
+```
 
-- Python 3.10+
-- An MCP host (opencode, Claude Desktop, Cursor, etc.)
+---
 
-## Quick Start
+## Harness Configuration
 
-### With opencode
+If you install via the pre-built installer, detected harnesses are configured automatically. For manual setup:
 
-Add to your `opencode.json`:
-
+### OpenCode
+Add to `~/.config/opencode/opencode.json` (Linux) or `%USERPROFILE%\.config\opencode\opencode.json` (Windows):
 ```json
 {
   "mcp": {
-    "lmms": {
+    "mxm": {
       "type": "local",
-      "command": ["python", "-m", "lmms_mcp"],
-      "environment": {
-        "MXM_PROJECTS_DIR": "/path/to/your/mxm/projects"
-      }
+      "command": ["mxm-mcp"]
     }
   }
 }
 ```
 
-### With Claude Desktop
-
-Add to `claude_desktop_config.json`:
-
+### Codex
+Add to `~/.codex/config.json` (Linux) or `%USERPROFILE%\.codex\config.json` (Windows):
 ```json
 {
   "mcpServers": {
-    "lmms": {
-      "command": "python",
-      "args": ["-m", "lmms_mcp"],
-      "env": {
-        "MXM_PROJECTS_DIR": "/path/to/your/mxm/projects"
-      }
+    "mxm": {
+      "command": "mxm-mcp",
+      "args": []
     }
   }
 }
 ```
 
-### Run directly
-
-```bash
-python -m lmms_mcp
+### Claude Desktop
+Add to `~/.config/Claude/claude_desktop_config.json` (Linux) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+```json
+{
+  "mcpServers": {
+    "mxm": {
+      "command": "mxm-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
-## Tools
+### Automated Harness Configuration Helper
+You can also run the bundled configuration script directly at any time:
+```bash
+python3 installer/configure_harnesses.py detect
+python3 installer/configure_harnesses.py configure --binary ~/.local/bin/mxm-mcp --all
+python3 installer/configure_harnesses.py status
+```
+
+---
+
+## Tool Reference
 
 ### Project Management
 
 | Tool | Description |
 |------|-------------|
-| `create_project` | Create a new empty LMMS project |
+| `create_project` | Create a new empty MXM project |
 | `load_project` | Load an existing `.mmpz` or `.mmp` file |
 | `save_project` | Save the current project |
-| `get_project_info` | Get project overview (tempo, tracks, mixer) |
-| `get_project_xml` | Get raw XML of the project |
+| `get_project_info` | Get project overview (tempo, tracks, mixer channels) |
+| `get_project_xml` | Get raw XML of the current project |
 
 ### Track Operations
 
 | Tool | Description |
 |------|-------------|
-| `add_instrument_track` | Add a synthesizer/sampler track |
+| `add_instrument_track` | Add a synthesizer or sampler track |
 | `add_sample_track` | Add an audio sample track |
 | `add_automation_track` | Add a parameter automation track |
-| `add_pattern_track` | Add a beat/bassline pattern track |
+| `add_pattern_track` | Add a Beat/Bassline pattern track |
 | `remove_track` | Remove a track by index |
 | `get_track` | Get detailed track information |
 | `list_tracks` | List all tracks with summary |
-| `set_track_volume` | Set track volume (0-200) |
+| `set_track_volume` | Set track volume (0–200) |
 | `set_track_panning` | Set track panning (-100 to +100) |
-| `mute_track` | Mute/unmute a track |
-| `solo_track` | Solo/unsolo a track |
+| `mute_track` | Mute or unmute a track |
+| `solo_track` | Solo or unsolo a track |
 
 ### Notes & Patterns
 
 | Tool | Description |
 |------|-------------|
 | `add_note` | Add a note by MIDI key number |
-| `add_note_by_name` | Add a note by name (e.g. "C4", "A#3", "Bb2") |
-| `add_notes_batch` | Add multiple notes at once |
+| `add_note_by_name` | Add a note by name (e.g. `C4`, `A#3`, `Bb2`) |
+| `add_notes_batch` | Add multiple notes in a single call |
 
 ### Musical Unit Composition & Deterministic Editing
 
-Deterministic, AI-decision-free musical manipulation primitives with preview/apply parity:
-
 | Tool | Description |
 |------|-------------|
-| `add_phrase` | Place and repeat motifs/phrases with exact per-occurrence transforms (transpose, stretch, reverse, quantize, velocity) |
+| `add_phrase` | Place and repeat motifs/phrases with exact transforms (transpose, stretch, reverse, quantize, velocity) |
 | `add_chord` | Place chords via explicit pitches or deterministic symbols (e.g. `C4maj`, `A3min7/G3`, inversions, drop2/drop3 voicings) |
 | `add_progression` | Place sequential or absolute chord progressions across timeline bars/ticks |
 | `add_rhythm` | Place rhythmic patterns from step grids or hit lists on instrument or Beat/Bassline tracks |
@@ -133,22 +188,23 @@ Deterministic, AI-decision-free musical manipulation primitives with preview/app
 | `add_automation_batch` | Batch create parameter curves (tempo, volume, panning, pitch) with validation and clamp/error policies |
 | `edit_automation` | Transform, scale, shift, clamp, reverse, or replace points on existing automation curves |
 
-### Mixer
+### Mixer & Routing
 
 | Tool | Description |
 |------|-------------|
 | `add_mixer_channel` | Create a new mixer channel |
-| `get_mixer_channels` | List all mixer channels |
-| `set_mixer_channel_volume` | Set channel volume |
-| `set_mixer_channel_name` | Rename a channel |
+| `get_mixer_channels` | List all mixer channels and their settings |
+| `set_mixer_channel_volume` | Set channel volume (0–200) |
+| `set_mixer_channel_name` | Rename a mixer channel |
+| `set_track_mixer_channel` | Route an instrument or sample track to an FX channel (`mixch`) |
 
 ### Song Settings
 
 | Tool | Description |
 |------|-------------|
-| `set_tempo` | Set BPM (10-999) |
+| `set_tempo` | Set song BPM (10–999) |
 | `set_time_signature` | Set time signature (e.g. 4/4, 3/4) |
-| `set_master_volume` | Set master volume (0-200) |
+| `set_master_volume` | Set master volume (0–200) |
 | `set_master_pitch` | Set master pitch (-12 to +12 semitones) |
 
 ### Effects (FX Chain)
@@ -157,289 +213,106 @@ Deterministic, AI-decision-free musical manipulation primitives with preview/app
 |------|-------------|
 | `add_effect` | Add a built-in effect to a track or mixer channel |
 | `remove_effect` | Remove an effect by name or chain position |
-| `toggle_effect` | Enable/bypass an effect without removing it |
+| `toggle_effect` | Enable or bypass an effect |
 | `get_effect_chain` | List all effects on a track or mixer channel |
+
+Built-in effects: `amplifier`, `bassbooster`, `bitcrush`, `compressor`, `crossovereq`, `delay`, `dispersion`, `dualfilter`, `dynamicsprocessor`, `eq`, `flanger`, `frequencyshifter`, `multitapecho`, `reverbsc`, `slewdistortion`, `stereoenhancer`, `stereomatrix`, `waveshaper`.
 
 ### ZynAddSubFX Presets & Parameters
 
 | Tool | Description |
 |------|-------------|
-| `list_zyn_presets` | Browse ~950 factory presets (.xiz) by category |
-| `load_zyn_preset` | Load a preset into a zynaddsubfx track |
-| `set_zyn_params` | Set portamento, filter, FM gain, resonance etc. |
+| `list_zyn_presets` | Browse ~950 factory presets (`.xiz`) by category |
+| `load_zyn_preset` | Load a factory preset into a ZynAddSubFX track |
+| `set_zyn_params` | Tune portamento, filter, FM gain, resonance, and bandwidth |
 
 ### Arrangement (Song Editor Timeline)
 
 | Tool | Description |
 |------|-------------|
 | `place_pattern` | Place an empty pattern clip on an instrument track |
-| `place_bb_clip` | Trigger a BB pattern at a given time |
+| `place_bb_clip` | Trigger a Beat/Bassline pattern clip at a given time |
 | `place_sample_clip` | Place an audio file clip on a sample track |
-| `assign_sample_file` | Assign/replace the audio file on sample clips |
+| `assign_sample_file` | Assign or replace the audio file on a sample clip |
 | `move_clip` | Move a clip to a new position |
 | `delete_clip` | Delete a clip at a position |
-| `get_arrangement` | Full timeline overview of all clips |
+| `get_arrangement` | Full timeline overview of all clips sorted by position |
 
 ### Automation
 
 | Tool | Description |
 |------|-------------|
-| `add_automation` | Create automation curves for tempo, master volume/pitch, track volume/panning and mixer channel volume |
+| `add_automation` | Create automation curves for tempo, master volume/pitch, track volume/panning, and mixer channel volume |
 
 ### App Integration
 
 | Tool | Description |
 |------|-------------|
-| `get_mxm_info` | Detect installed MXM version + available plugins |
-| `render_project` | Export to WAV/FLAC/OGG/MP3 via headless MXM render |
+| `get_mxm_info` | Detect installed MXM DAW version, executable path, and available plugins |
+| `render_project` | Export current project to WAV, FLAC, OGG, or MP3 via headless MXM render |
 
-MXM is the only DAW binary this server detects or invokes. The server
-reads and writes LMMS-format project files directly - it never launches
-the MXM GUI. The installed MXM is only used for ZynAddSubFX data-path
-resolution, plugin availability checks (warns about plugins the installed
-build lacks, e.g. SlicerT/Xpressive require a 1.3-lineage build) and audio
-rendering.
-
-### Custom Plugins & VST
+### Native VST3, LV2 & Plugin Discovery
 
 | Tool | Description |
 |------|-------------|
-| `list_available_plugins` | Dynamically list ALL installed plugins (incl. custom ones) |
+| `list_available_plugins` | Dynamically list all plugins installed in your MXM build |
 | `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
 | `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
 | `list_native_plugins` | Enumerate filesystem-discovered VST3 and LV2 plugins |
 | `inspect_native_plugin` | Inspect a discovered VST3/LV2 plugin by name or identity |
 | `add_lv2_instrument_track` | Add an installed instrument with MXM's native LV2 host |
 | `list_plugin_presets` | Search installed VST3 and RDF-declared LV2 preset banks |
-| `load_native_plugin_preset` | Embed supported VST3/LV2 preset state in a project |
+| `load_native_plugin_preset` | Embed supported VST3/LV2 preset state into a project |
 | `refresh_native_plugin_discovery` | Clear cached indexes and rescan plugins/presets |
 | `scan_vst_directory` | Find legacy VST2 `.dll` files in a folder |
 | `add_vst_track` | Add a track hosting a legacy VST2 plugin (Vestige) |
 
-Custom plugins dropped into MXM's plugins folder are detected
-automatically and can be used directly by name - no server update needed.
-
-**Native VST3 (MXM):** MXM hosts VST3 instruments natively through its
-`vst3instrument` plugin. Use `list_vst3_instruments` to find a plugin and
-`add_vst3_instrument_track` with its `module` path and 32-character `cid`.
-This is MXM's own host, never routed through Carla.
-
-Discovery follows MXM's per-platform search locations (Linux, Windows and
-macOS bundle layouts) plus `$VST3_PATH`, recursively and with absolute paths.
-`MXM_VST3_PATH_ONLY` (any value) restricts it to `$VST3_PATH`. Class ids and
-factory interface ids use the platform's VST3 byte order (COM/GUID order on
-Windows), and class names are read through `IPluginFactory3` so non-ASCII
-names survive. MXM currently compiles its VST3 host for Linux and Windows;
-`host_available` reports whether the installed binary actually has it.
-
-Native VST3 and LV2 discovery reads installed bundles and RDF/filesystem
-metadata directly; it never starts the MXM GUI. VST3 scans include the usual
-platform paths and `$VST3_PATH`; LV2 scans include the standard bundle roots
-and `$LV2_PATH`. VST3 preset search follows Steinberg's platform-specific
-user/shared preset roots and company/plugin subdirectories, u-he preset directories
-(`~/.u-he`, `~/Documents/u-he`), with `$VST3_PRESET_PATH` and `$UHE_PRESET_PATH`
-as optional additional roots. It indexes standard `.vstpreset` component state and
-u-he `.h2p` presets; LV2 presets are discovered from `pset:Preset` RDF in LV2
-bundles. Factory/user origin and optional metadata are reported only when available.
-Refresh after installing or updating plugins/presets; indexes otherwise reuse
-filesystem-identity-checked cached results persisted to disk at
-`$XDG_CACHE_HOME/lmms-mcp/discovery-cache.json` (`~/.cache/lmms-mcp/discovery-cache.json`)
-or `%LOCALAPPDATA%/lmms-mcp/discovery-cache.json` on Windows across server runs.
-`list_plugin_presets` requires a `plugin` value and returns presets only for
-that plugin; there is no unfiltered/global preset search. Use the plugin name,
-LV2 URI, VST3 `module` bundle path, or VST3 `cid` from
-`list_native_plugins`/`list_vst3_instruments`. Passing the VST3 `module` path is
-most reliable; a `cid` also resolves when its descriptor was probed earlier in
-the same server process. Name-filtered VST3 searches avoid recursively scanning
-the entire VST3 catalog or prompting for unrelated plugins. `plugin_type="all"`
-searches the specified plugin across VST3 and LV2; specify `vst3` or `lv2` to
-limit the format. `limit` controls returned pagination, not discovery work.
-
-VST3 factory probing executes third-party module code in a separate process.
-Before the first probe of each binary, the server requests per-plugin consent
-through MCP form elicitation when the client advertises support. The user can
-allow that probe once, permanently trust that exact binary, or deny it. Permanent
-decisions are stored in the user's local LMMS MCP config directory and are tied
-to the binary's SHA-256; replacing a binary requires a new decision. When a
-client lacks elicitation, the server returns a short-lived one-use token and a
-frozen action; the host should ask the user with its question UI before calling
-`resolve_native_plugin_access`. Denied plugins are skipped. Consent is not a
-sandbox: an approved plugin runs with the MCP server user's normal filesystem
-and network permissions. The trust file is
-`$XDG_CONFIG_HOME/lmms-mcp/native-plugin-permissions.json` (default
-`~/.config/lmms-mcp/native-plugin-permissions.json`) or
-`%APPDATA%/lmms-mcp/native-plugin-permissions.json` on Windows; remove an entry
-there to revoke a permanent decision.
-
-`load_native_plugin_preset` embeds VST3 component chunks, u-he `.h2p` streams, or
-LV2 input-control port values into the MMP project. Preset formats without a known
-compatible project-state representation are listed but marked non-loadable; opaque
-state is not reverse-engineered or left dependent on the original preset file. VST3
-presets with separate controller/unknown state chunks are marked non-loadable
-until the MMP host representation can preserve those chunks too.
-
-### Utilities
+### Musical Utilities
 
 | Tool | Description |
 |------|-------------|
-| `note_name_to_key` | Convert note name to MIDI number |
-| `key_to_note_name` | Convert MIDI number to note name |
-| `bars_to_ticks_converter` | Convert bars to ticks |
-| `ticks_to_bars_converter` | Convert ticks to bars |
-| `generate_scale` | Generate a musical scale |
+| `note_name_to_key` | Convert note name (e.g. `C4`) to MIDI key number |
+| `key_to_note_name` | Convert MIDI key number to note name |
+| `bars_to_ticks_converter` | Convert musical bars to project ticks |
+| `ticks_to_bars_converter` | Convert project ticks to musical bars |
+| `generate_scale` | Generate note names in a musical scale |
 
-## Resources
-
-| URI | Description |
-|-----|-------------|
-| `lmms://project/info` | Current project information |
-| `lmms://project/tracks` | All tracks in the project |
-| `lmms://project/mixer` | All mixer channels |
-| `lmms://project/xml` | Raw project XML |
-| `lmms://reference/instruments` | Available LMMS instruments |
-| `lmms://reference/effects` | Available LMMS effects |
-| `lmms://reference/note_names` | MIDI note name mapping |
-| `lmms://reference/scales` | Available musical scales |
-
-## Prompts
-
-| Name | Description |
-|------|-------------|
-| `create_basic_song` | Create a song structure with drums, bass, melody |
-| `add_drum_pattern` | Generate a drum pattern (four-on-the-floor, breakbeat, etc.) |
-| `create_melody` | Generate a melody in a given scale |
-| `mix_and_arrange` | Mix and arrange the current project |
-| `export_project` | Export/save the project |
-
-## LMMS Concepts
-
-| Concept | Value |
-|---------|-------|
-| Ticks per bar | 192 (in 4/4 time) |
-| Default tempo | 140 BPM |
-| Note 60 | C4 (middle C) |
-| Note 69 | A4 (440 Hz) |
-| Volume range | 0-200 (100 = normal) |
-| Panning range | -100 (left) to +100 (right) |
-| Track type 0 | Instrument |
-| Track type 1 | Pattern (Beat/Bassline) |
-| Track type 2 | Sample |
-| Track type 5 | Automation |
-
-## Available Instruments
-
-All built-in LMMS instruments (verified against LMMS source). LMMS has no
-plugin download mechanism - only these can be used:
-
-| Plugin ID | Name |
-|-----------|------|
-| `tripleoscillator` | Three-oscillator subtractive synth (default) |
-| `kicker` | Kick drum synth |
-| `audiofileprocessor` | Audio file player/sampler |
-| `organic` | Additive organ synth |
-| `malletsstk` | Physical modeling mallets (STK) |
-| `lb302` | TB-303 style acid bass |
-| `monstro` | Powerful 3-oscillator polyphonic synth |
-| `freeboy` | Game Boy sound chip emulator |
-| `nes` | NES 8-bit sound chip emulator |
-| `sid` | Commodore 64 SID chip emulator |
-| `sfxr` | Retro sound effect generator |
-| `opulenz` | OPL3 FM synthesizer |
-| `watsyn` | 4-oscillator wavetable-style synth |
-| `xpressive` | Expressive mono lead synth |
-| `zynaddsubfx` | ZynAddSubFX powerful feature-rich synth |
-| `sf2player` | SoundFont (.sf2) sample player |
-| `vibedstrings` | Vibrating string physical model |
-| `bitinvader` | Bit-crushed wavetable synth |
-| `patman` | GUS patch sampler |
-| `gigplayer` | GIG sample library player |
-| `slicert` | Beat slicer for audio loops |
-| `vestige` | VST plugin host (Windows only) |
-
-## Available Effects
-
-Built-in LMMS effects for `add_effect`: `amplifier`, `bassbooster`,
-`bitcrush`, `compressor`, `crossovereq`, `delay`, `dispersion`,
-`dualfilter`, `dynamicsprocessor`, `eq`, `flanger`, `frequencyshifter`,
-`multitapecho`, `reverbsc`, `slewdistortion`, `stereoenhancer`,
-`stereomatrix`, `waveshaper`.
-
-Typical chains:
-- Lead synth: `delay` -> `reverbsc`
-- Vocals: `eq` -> `compressor` -> `reverbsc`
-- Master bus: `eq` -> `compressor` -> `stereoenhancer`
+---
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MXM_PROJECTS_DIR` | current working directory | Directory for saves with no explicit path |
-| `MXM_EXECUTABLE` | auto-detected | Path to the MXM binary (for version/build checks and rendering) |
-| `MXM_PLUGIN_DIR` | auto-detected | MXM plugins directory (for plugin availability checks) |
-| `MXM_PRESETS_DIR` | auto-detected | Path to the ZynAddSubFX presets folder (`presets/ZynAddSubFX`) |
+| `MXM_PROJECTS_DIR` | Current working directory | Default directory for project saves with relative paths |
+| `MXM_EXECUTABLE` | Auto-detected | Path to the MXM DAW binary (for rendering and plugin verification) |
+| `MXM_PLUGIN_DIR` | Auto-detected | MXM plugins directory (for plugin library scans) |
+| `MXM_PRESETS_DIR` | Auto-detected | Path to the ZynAddSubFX presets directory |
+| `MXM_VST3_PATH_ONLY` | None | When set, restricts native VST3 discovery to `$VST3_PATH` |
 
-## Configuration
-
-### opencode.json
-
-```json
-{
-  "mcp": {
-    "lmms": {
-      "type": "local",
-      "command": ["python", "-m", "lmms_mcp"],
-      "cwd": ".",
-      "enabled": true,
-      "environment": {
-        "MXM_PROJECTS_DIR": "C:\\Users\\you\\Music\\MXM\\Projects"
-      }
-    }
-  }
-}
-```
-
-### claude_desktop_config.json
-
-```json
-{
-  "mcpServers": {
-    "lmms": {
-      "command": "python",
-      "args": ["-m", "lmms_mcp"],
-      "env": {
-        "MXM_PROJECTS_DIR": "/home/you/music/mxm/projects"
-      }
-    }
-  }
-}
-```
+---
 
 ## Development
 
 ```bash
-# Clone and install
-git clone https://github.com/TypeWolf/lmms-mcp.git
-cd lmms-mcp
-pip install -e ".[dev]"
+# Clone the repository
+git clone https://github.com/realrandolph/mxm-mcp.git
+cd mxm-mcp
 
-# Run tests
-pytest
+# Install with development dependencies
+uv sync --extra dev
 
-# Run in development mode
-mcp dev src/lmms_mcp/server.py
+# Run unit and integration tests
+uv run pytest -m "not integration"
+
+# Build standalone Linux installer package
+bash scripts/build_linux_package.sh
+
+# Build standalone Windows installer package (on Windows)
+python scripts/build_windows_package.py
 ```
+
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
-
-## Links
-
-- [LMMS](https://lmms.io/) - Upstream project of MXM, the DAW this server controls
-- [MCP Protocol](https://modelcontextprotocol.io/) - Model Context Protocol specification
-- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) - Official Python SDK
-- [opencode](https://opencode.ai/) - AI coding assistant with MCP support
+MIT License — see [LICENSE](LICENSE) for details.
