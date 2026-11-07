@@ -77,7 +77,7 @@ def get_installed_plugins() -> set[str]:
     """Set of plugin library names shipped with the installed MXM.
 
     Names are lowercase LMMS plugin basenames (e.g. "tripleoscillator",
-    "reverbsc", "carlarack"). Returns an empty set if MXM is not found.
+    "reverbsc", "lb302"). Returns an empty set if MXM is not found.
     """
     plugins_dir = get_plugins_dir()
     if plugins_dir is None:
@@ -165,17 +165,6 @@ def clear_mxm_build_options_cache() -> None:
     _mxm_build_options_cached.cache_clear()
 
 
-def mxm_supports_carla() -> bool:
-    """Whether the installed MXM exposes its Carla instrument plugins."""
-    installed = get_installed_plugins()
-    if {"carlarack", "carlapatchbay"} <= installed:
-        return True
-    options = get_mxm_build_options()
-    return any(options.get(name, False) for name in (
-        "carla", "have_carla", "have_weakcarla",
-    ))
-
-
 def mxm_supports_native_vst3() -> bool:
     """Whether the installed MXM was built with native VST3 hosting.
 
@@ -232,8 +221,6 @@ def check_plugin_available(plugin_name: str) -> tuple[bool, str]:
     verify).
     """
     name = plugin_name.lower()
-    if name in {"carlarack", "carlapatchbay"} and mxm_supports_carla():
-        return True, "installed"
     if name in STATIC_PLUGINS:
         return True, "built-in"
     installed = get_installed_plugins()
