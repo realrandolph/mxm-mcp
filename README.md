@@ -258,7 +258,7 @@ Built-in effects: `amplifier`, `bassbooster`, `bitcrush`, `compressor`, `crossov
 | `list_available_plugins` | Dynamically list all plugins installed in your MXM build |
 | `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
 | `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
-| `list_native_plugins` | Enumerate filesystem-discovered VST3 and LV2 plugins |
+| `list_native_plugins` | Enumerate filesystem-discovered VST3 and LV2 plugins with pagination and compact records |
 | `inspect_native_plugin` | Inspect a discovered VST3/LV2 plugin by name or identity |
 | `add_lv2_instrument_track` | Add an installed instrument with MXM's native LV2 host |
 | `list_plugin_presets` | Search installed VST3 and RDF-declared LV2 preset banks |
