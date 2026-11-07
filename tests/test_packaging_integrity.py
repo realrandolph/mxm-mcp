@@ -66,8 +66,10 @@ def test_package_workflow_covers_requested_triggers_and_platforms() -> None:
     workflow = read_text(".github/workflows/package.yml")
 
     assert "feat/package-mxm-mcp-14" in workflow
+    assert "master" in workflow
     assert '"v*"' in workflow
     assert "workflow_dispatch" in workflow
+    assert "contents: write" in workflow
     assert "runs-on: ubuntu-22.04" in workflow
     assert "runs-on: windows-latest" in workflow
     assert "scripts/build_linux_package.sh" in workflow
@@ -75,6 +77,7 @@ def test_package_workflow_covers_requested_triggers_and_platforms() -> None:
     assert "0o755" in workflow
     assert "mxm-mcp-linux-x86_64.tar.gz" in workflow
     assert "mxm-mcp-setup-windows-x64.exe" in workflow
+    assert "publish-release" in workflow
 
 
 def test_general_ci_discovers_harness_and_packaging_tests() -> None:
