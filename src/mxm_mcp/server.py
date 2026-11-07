@@ -87,8 +87,6 @@ KNOWN_INSTRUMENTS = {
     "gigplayer": "GIG sample library player",
     "bitinvader": "Bit-crushed wavetable synth",
     "vestige": "VST plugin host (Windows only)",
-    "carlarack": "Carla Rack bridge for Linux/macOS plugins",
-    "carlapatchbay": "Carla Patchbay bridge for Linux/macOS plugins",
 }
 
 # Recommended instruments per use case - helps agents pick valid plugins
@@ -317,8 +315,10 @@ def add_instrument_track(
     proj = get_project()
 
     if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
-        if not mxm_app.mxm_supports_carla():
-            return json.dumps({"error": "Installed MXM does not expose Carla Rack/Patchbay plugins"})
+        return json.dumps({
+            "error": "Carla is not supported. Use native VST3 "
+                     "(add_vst3_instrument_track) or native LV2 (add_lv2_instrument_track).",
+        })
 
     if instrument.strip().lower() == xml_parser.NATIVE_VST3_HOST:
         return json.dumps({
@@ -1299,8 +1299,6 @@ def list_available_plugins() -> str:
     directly by name in add_instrument_track / add_effect.
     """
     known_inst = set(KNOWN_INSTRUMENTS.keys())
-    if not mxm_app.mxm_supports_carla():
-        known_inst -= {"carlarack", "carlapatchbay"}
     known_eff = set(effects_mod.KNOWN_EFFECTS.keys())
     classified = mxm_app.classify_installed_plugins(known_inst, known_eff)
     binary = mxm_app.find_mxm_binary()
@@ -1310,8 +1308,6 @@ def list_available_plugins() -> str:
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
         "custom_plugins_unknown_type": classified["unknown"],
-        "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
-                              if mxm_app.mxm_supports_carla()],
         "native_vst3_instrument_host": {
             "plugin": xml_parser.NATIVE_VST3_HOST,
             "mxm_available": mxm_app.mxm_supports_native_vst3(),
@@ -1320,7 +1316,7 @@ def list_available_plugins() -> str:
         "note": "Custom plugins can be used by their DLL name in "
                 "add_instrument_track or add_effect. For legacy VST .dll "
                 "files use add_vst_track; for native VST3 use "
-                "list_vst3_instruments + add_vst3_instrument_track (not Carla).",
+                "list_vst3_instruments + add_vst3_instrument_track.",
     }, indent=2)
 
 
@@ -1332,51 +1328,6 @@ def scan_linux_plugins(directory: str, recursive: bool = True) -> str:
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps({"directory": directory, "count": len(plugins), "plugins": plugins}, indent=2)
-
-
-@mcp.tool()
-def add_carla_instrument_track(
-    name: str,
-    bridge: str = "carlarack",
-    mixer_channel: int = 0,
-    volume: int = 100,
-    panning: int = 0,
-) -> str:
-    """Add an LMMS Carla Rack or Patchbay instrument track."""
-    bridge = bridge.strip().lower()
-    if bridge not in {"carlarack", "carlapatchbay"}:
-        return json.dumps({"error": "bridge must be 'carlarack' or 'carlapatchbay'"})
-    if not mxm_app.mxm_supports_carla():
-        return json.dumps({"error": "Installed MXM does not expose Carla plugins"})
-    project = get_project()
-    result = project.add_track("instrument", name, instrument=bridge,
-                               mixer_channel=mixer_channel, volume=volume,
-                               panning=panning)
-    if bridge == "carlarack":
-        xml_parser.configure_reference_carla_track(
-            xml_parser.find_track_element(project.root, result["track_index"])
-        )
-    result["bridge"] = bridge
-    return json.dumps(result)
-
-
-@mcp.tool()
-def load_carla_plugin(
-    track_index: int,
-    plugin_path: str,
-    plugin_id: str = "",
-) -> str:
-    """Load an installed VST3, CLAP, or LV2 plugin into a Carla track.
-
-    Surge XT uses MXM's native LV2 instrument host; use add_surge_xt_track.
-    """
-    try:
-        result = xml_parser.load_carla_plugin(get_project().root, track_index,
-                                              plugin_path, plugin_id)
-        get_project()._modified = True
-        return json.dumps(result)
-    except (ValueError, OSError) as exc:
-        return json.dumps({"error": str(exc)})
 
 
 @mcp.tool()

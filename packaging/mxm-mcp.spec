@@ -14,10 +14,6 @@ datas = []
 for package in ("mcp", "rdflib", "pydantic"):
     datas += collect_data_files(package)
 
-datas += [
-    (str(SOURCE / "mxm_mcp" / "carla_surge_state.b64"), "mxm_mcp"),
-]
-
 hiddenimports = []
 for package in (
     "mcp",
