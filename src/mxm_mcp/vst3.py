@@ -4,7 +4,7 @@ MXM hosts VST3 natively through its built-in ``vst3instrument`` plugin. This
 module finds the ``.vst3`` bundles MXM would find and reports the identity MXM
 matches on load: the bundle ``module`` path and its 32-hex ``cid``
 (``Vst3Manager::Descriptor::cid``), read from the module's own factory via
-:mod:`lmms_mcp.vst3_probe`. Deliberately separate from the Carla path.
+:mod:`mxm_mcp.vst3_probe`. Deliberately separate from the Carla path.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 
 from . import discovery_cache
-from . import lmms_app
+from . import mxm_app
 from . import vst3_platform as plat
 from .path_safety import resolved_path_within
 
@@ -55,7 +55,7 @@ def normalize_cid(cid: str) -> str:
 
 def _app_vst3_dir() -> Path | None:
     """Application ``vst3`` dir, resolved like MXM's app-level scan."""
-    return plat.app_dir_for_exe(lmms_app.find_mxm_binary())
+    return plat.app_dir_for_exe(mxm_app.find_mxm_binary())
 
 
 def standard_vst3_dirs() -> list[Path]:
@@ -262,7 +262,7 @@ def _probe_bundle(bundle: Path) -> dict:
     """Introspect one user-approved bundle in a crash-isolated process."""
     try:
         stdout, stderr, returncode, timed_out, output_exceeded = _run_capped_probe(
-            [sys.executable, "-m", "lmms_mcp.vst3_probe", str(bundle)],
+            [sys.executable, "-m", "mxm_mcp.vst3_probe", str(bundle)],
             _PROBE_OUTPUT_LIMIT, _PROBE_TIMEOUT_SECONDS,
         )
     except OSError as exc:

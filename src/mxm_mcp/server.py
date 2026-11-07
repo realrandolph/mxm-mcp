@@ -1,7 +1,9 @@
-"""LMMS MCP Server - AI-powered music production with LMMS.
+"""MXM MCP Server - AI-powered music production with MXM.
 
 This server provides tools, resources, and prompts for creating and
-manipulating LMMS projects programmatically via the Model Context Protocol.
+manipulating MXM projects programmatically via the Model Context Protocol.
+MXM is the digital audio workstation (DAW) these tools drive; project files
+keep the ``lmms-project`` XML format MXM's engine reads.
 """
 
 import json
@@ -16,7 +18,7 @@ from mcp.server.mcpserver.context import Context
 
 from . import discovery_cache
 from . import effects as effects_mod
-from . import lmms_app
+from . import mxm_app
 from . import lv2 as lv2_mod
 from . import plugin_permissions
 from . import presets as zyn_presets
@@ -96,14 +98,15 @@ INSTRUMENT_RECOMMENDATIONS = {
 }
 
 mcp = MCPServer(
-    "LMMS MCP Server",
-    instructions=f"""LMMS MCP Server for AI-powered music production.
+    "MXM MCP Server",
+    instructions=f"""MXM MCP Server for AI-powered music production.
 
-This server lets you create, load, modify, and save LMMS music projects.
-LMMS is a free, open-source digital audio workstation (DAW).
+This server lets you create, load, modify, and save MXM music projects.
+MXM is the digital audio workstation (DAW) these tools drive; it reads and
+writes the ``lmms-project`` XML file format (``.mmp`` / ``.mmpz``).
 
 Key concepts:
-- LMMS projects contain tracks (Instrument, Sample, Pattern, Automation)
+- MXM projects contain tracks (Instrument, Sample, Pattern, Automation)
 - Instrument tracks hold synthesizer/sampler plugins and patterns with notes
 - Pattern tracks (Beat/Bassline) hold drum patterns in the song editor
 - The Mixer has channels (0=Master) where tracks route their audio
@@ -112,7 +115,7 @@ Key concepts:
 - Volume: 0-200 (100=normal), Panning: -100 to +100
 
 IMPORTANT - Instruments: Only use built-in instrument names (see the
-add_instrument_track tool description or lmms://reference/instruments).
+add_instrument_track tool description or mxm://reference/instruments).
 MXM has NO plugin download mechanism. If asked for a sound you cannot
 produce, use tripleoscillator (universal synth) and explain the limitation.
 Safe choices: tripleoscillator, kicker (drums), lb302 (bass),
@@ -140,7 +143,7 @@ then load one of ~950 factory presets via load_zyn_preset (browse with
 list_zyn_presets). Fine-tune with set_zyn_params.
 
 Effects: Add built-in effects to tracks or mixer channels with add_effect
-(see lmms://reference/effects for the full list). Typical chains:
+(see mxm://reference/effects for the full list). Typical chains:
 - Lead: delay -> reverbsc
 - Vocals: eq -> compressor -> reverbsc
 - Master bus: eq -> compressor -> stereoenhancer
@@ -309,7 +312,7 @@ def add_instrument_track(
     proj = get_project()
 
     if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
-        if not lmms_app.mxm_supports_carla():
+        if not mxm_app.mxm_supports_carla():
             return json.dumps({"error": "Installed MXM does not expose Carla Rack/Patchbay plugins"})
 
     if instrument.strip().lower() == xml_parser.NATIVE_VST3_HOST:
@@ -341,7 +344,7 @@ def add_instrument_track(
         resolved = alias_map.get(normalized)
         if resolved is None:
             # Not a known name - but maybe a custom/newly installed plugin?
-            installed = lmms_app.get_installed_plugins()
+            installed = mxm_app.get_installed_plugins()
             if normalized in installed:
                 result_msg = {
                     "message": f"Added instrument track '{name}' with "
@@ -373,7 +376,7 @@ def add_instrument_track(
         normalized = resolved
 
     # Check the installed MXM actually ships this plugin
-    available, reason = lmms_app.check_plugin_available(normalized)
+    available, reason = mxm_app.check_plugin_available(normalized)
     warning = None
     if not available:
         warning = reason
@@ -842,7 +845,7 @@ def add_effect(
     """Add an effect to a track's or mixer channel's effect chain.
 
     Only effects with a complete known-valid control block are accepted.
-    Use describe_effect / lmms://reference/effects for parameters.
+    Use describe_effect / mxm://reference/effects for parameters.
 
     Args:
         target_type: "track" or "mixer"
@@ -858,10 +861,10 @@ def add_effect(
         result = effects_mod.add_effect(parent, effect, wet, enabled, position,
                                         plugin_path or None, plugin_id or None,
                                         params)
-        available, reason = lmms_app.check_plugin_available(effect)
+        available, reason = mxm_app.check_plugin_available(effect)
         if not available:
             # Custom effect plugin? (DLL exists but not in known list)
-            installed = lmms_app.get_installed_plugins()
+            installed = mxm_app.get_installed_plugins()
             if effect.strip().lower() in installed:
                 result["note"] = (
                     f"'{effect}' is a custom plugin - parameters use "
@@ -1173,7 +1176,7 @@ def get_mxm_info() -> str:
     instrument/effect plugins are actually available. Use this to check
     whether a plugin is supported before using it.
     """
-    binary = lmms_app.find_mxm_binary()
+    binary = mxm_app.find_mxm_binary()
     if binary is None:
         return json.dumps({
             "found": False,
@@ -1182,19 +1185,19 @@ def get_mxm_info() -> str:
                        "cannot be verified and rendering is disabled. "
                        "Set MXM_EXECUTABLE env var to your MXM binary.",
         })
-    installed = sorted(lmms_app.get_installed_plugins())
+    installed = sorted(mxm_app.get_installed_plugins())
     # Intersect with our known instruments/effects for quick reference
     inst_available = [
         i for i in KNOWN_INSTRUMENTS
-        if lmms_app.check_plugin_available(i)[0]
+        if mxm_app.check_plugin_available(i)[0]
     ]
     eff_available = [
         e for e in effects_mod.EFFECT_SPECS
-        if lmms_app.check_plugin_available(e)[0]
+        if mxm_app.check_plugin_available(e)[0]
     ]
     return json.dumps({
         "found": True,
-        "version": lmms_app.get_mxm_version(),
+        "version": mxm_app.get_mxm_version(),
         "path": str(binary),
         "plugin_count": len(installed),
         "instruments_verified_available": inst_available,
@@ -1229,7 +1232,7 @@ def render_project(
         return json.dumps({
             "error": "Project has never been saved. Call save_project first."
         })
-    binary = lmms_app.find_mxm_binary()
+    binary = mxm_app.find_mxm_binary()
     if binary is None:
         return json.dumps({
             "error": "MXM binary not found. Set MXM_EXECUTABLE env var.",
@@ -1291,22 +1294,22 @@ def list_available_plugins() -> str:
     directly by name in add_instrument_track / add_effect.
     """
     known_inst = set(KNOWN_INSTRUMENTS.keys())
-    if not lmms_app.mxm_supports_carla():
+    if not mxm_app.mxm_supports_carla():
         known_inst -= {"carlarack", "carlapatchbay"}
     known_eff = set(effects_mod.KNOWN_EFFECTS.keys())
-    classified = lmms_app.classify_installed_plugins(known_inst, known_eff)
-    binary = lmms_app.find_mxm_binary()
+    classified = mxm_app.classify_installed_plugins(known_inst, known_eff)
+    binary = mxm_app.find_mxm_binary()
     return json.dumps({
         "mxm_found": binary is not None,
-        "version": lmms_app.get_mxm_version(),
+        "version": mxm_app.get_mxm_version(),
         "built_in_instruments": sorted(known_inst),
         "built_in_effects": sorted(known_eff),
         "custom_plugins_unknown_type": classified["unknown"],
         "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
-                              if lmms_app.mxm_supports_carla()],
+                              if mxm_app.mxm_supports_carla()],
         "native_vst3_instrument_host": {
             "plugin": xml_parser.NATIVE_VST3_HOST,
-            "mxm_available": lmms_app.mxm_supports_native_vst3(),
+            "mxm_available": mxm_app.mxm_supports_native_vst3(),
             "tools": ["list_vst3_instruments", "add_vst3_instrument_track"],
         },
         "note": "Custom plugins can be used by their DLL name in "
@@ -1320,7 +1323,7 @@ def list_available_plugins() -> str:
 def scan_linux_plugins(directory: str, recursive: bool = True) -> str:
     """Discover VST3, CLAP, LV2, and LADSPA plugins on Linux."""
     try:
-        plugins = lmms_app.find_linux_plugins(directory, recursive)
+        plugins = mxm_app.find_linux_plugins(directory, recursive)
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps({"directory": directory, "count": len(plugins), "plugins": plugins}, indent=2)
@@ -1338,7 +1341,7 @@ def add_carla_instrument_track(
     bridge = bridge.strip().lower()
     if bridge not in {"carlarack", "carlapatchbay"}:
         return json.dumps({"error": "bridge must be 'carlarack' or 'carlapatchbay'"})
-    if not lmms_app.mxm_supports_carla():
+    if not mxm_app.mxm_supports_carla():
         return json.dumps({"error": "Installed MXM does not expose Carla plugins"})
     project = get_project()
     result = project.add_track("instrument", name, instrument=bridge,
@@ -1418,13 +1421,13 @@ def add_talking_bass_track(
 
     talkingbass.lv2 is an InstrumentPlugin (MIDI in, stereo out). Hosting it as
     lv2effect crashes MXM. Requires ~/.lv2/talkingbass.lv2
-    (make -C lmms-mcp/plugins/talkingbass install).
+    (make -C mxm-mcp/plugins/talkingbass install).
     """
     bundle = Path(xml_parser.TALKINGBASS_LV2_BUNDLE)
     if not (bundle / "talkingbass.so").is_file():
         return json.dumps({
             "error": f"Talking Bass LV2 not installed at {bundle}",
-            "hint": "Run: make -C lmms-mcp/plugins/talkingbass install",
+            "hint": "Run: make -C mxm-mcp/plugins/talkingbass install",
         })
     proj = get_project()
     result = proj.add_track(
@@ -1776,7 +1779,7 @@ async def list_vst3_instruments(
         "host": xml_parser.NATIVE_VST3_HOST, "native": True, "carla": False,
         "discovery_supported": vst3_mod.native_vst3_discovery_supported(),
         "path_only": vst3_mod.path_only_enabled(),
-        "host_available": lmms_app.mxm_supports_native_vst3(),
+        "host_available": mxm_app.mxm_supports_native_vst3(),
         "search_paths": vst3_mod.effective_search_paths(),
         "instrument_count": len(instruments),
         "effect_count": len(plugins) - len(instruments),
@@ -2462,7 +2465,7 @@ async def add_vst3_instrument_track(
         warnings.append("this MCP cannot discover native VST3 plugins here")
     if not Path(descriptor["module"]).exists():
         warnings.append(f"module not found on disk: {descriptor['module']}")
-    if not lmms_app.mxm_supports_native_vst3():
+    if not mxm_app.mxm_supports_native_vst3():
         warnings.append("installed MXM was not detected with native VST3 support")
     if warnings:
         result["warning"] = "; ".join(warnings)
@@ -2482,7 +2485,7 @@ def scan_vst_directory(directory: str, recursive: bool = True) -> str:
         recursive: Include subdirectories
     """
     try:
-        plugins = lmms_app.find_vst_plugins(directory, recursive)
+        plugins = mxm_app.find_vst_plugins(directory, recursive)
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps({
@@ -2542,7 +2545,7 @@ def add_vst_track(
         vestige_el = track.find("instrumenttrack/instrument/vestige")
         if vestige_el is not None:
             # Prefer path relative to the MXM install dir when possible
-            binary = lmms_app.find_mxm_binary()
+            binary = mxm_app.find_mxm_binary()
             try:
                 rel = path.relative_to(binary.parent) if binary else None
             except ValueError:
@@ -3466,17 +3469,25 @@ def edit_automation(
 # ──────────────────────────────────────────────────────────────────
 # RESOURCES
 # ──────────────────────────────────────────────────────────────────
+#
+# Every resource is published under the ``mxm://`` scheme. The same handlers
+# stay registered under the legacy ``lmms://`` scheme so clients configured
+# before the rename keep working unchanged.
+
+_LEGACY_NOTE = "Legacy alias of mxm://{}; kept for backwards compatibility."
 
 
-@mcp.resource("lmms://project/info")
+@mcp.resource("mxm://project/info")
+@mcp.resource("lmms://project/info", description=_LEGACY_NOTE.format("project/info"))
 def resource_project_info() -> str:
-    """Get current LMMS project information."""
+    """Get current MXM project information."""
     proj = get_project()
     info = proj.get_info()
     return json.dumps(info.to_dict(), indent=2)
 
 
-@mcp.resource("lmms://project/tracks")
+@mcp.resource("mxm://project/tracks")
+@mcp.resource("lmms://project/tracks", description=_LEGACY_NOTE.format("project/tracks"))
 def resource_project_tracks() -> str:
     """Get all tracks in the current project."""
     proj = get_project()
@@ -3485,7 +3496,8 @@ def resource_project_tracks() -> str:
     return json.dumps({"tracks": tracks}, indent=2)
 
 
-@mcp.resource("lmms://project/mixer")
+@mcp.resource("mxm://project/mixer")
+@mcp.resource("lmms://project/mixer", description=_LEGACY_NOTE.format("project/mixer"))
 def resource_project_mixer() -> str:
     """Get all mixer channels in the current project."""
     proj = get_project()
@@ -3494,14 +3506,22 @@ def resource_project_mixer() -> str:
     return json.dumps({"mixer_channels": channels}, indent=2)
 
 
-@mcp.resource("lmms://project/xml")
+@mcp.resource("mxm://project/xml")
+@mcp.resource("lmms://project/xml", description=_LEGACY_NOTE.format("project/xml"))
 def resource_project_xml() -> str:
-    """Get the raw XML of the current project."""
+    """Get the raw XML of the current project.
+
+    The document keeps the ``lmms-project`` root element MXM's engine reads.
+    """
     proj = get_project()
     return proj.get_xml_string()
 
 
-@mcp.resource("lmms://reference/instruments")
+@mcp.resource("mxm://reference/instruments")
+@mcp.resource(
+    "lmms://reference/instruments",
+    description=_LEGACY_NOTE.format("reference/instruments"),
+)
 def resource_instruments() -> str:
     """List of available built-in instrument plugins (verified)."""
     return json.dumps({
@@ -3515,11 +3535,15 @@ def resource_instruments() -> str:
     }, indent=2)
 
 
-@mcp.resource("lmms://reference/effects")
+@mcp.resource("mxm://reference/effects")
+@mcp.resource(
+    "lmms://reference/effects",
+    description=_LEGACY_NOTE.format("reference/effects"),
+)
 def resource_effects() -> str:
-    """List of available LMMS effects (built-in, verified)."""
+    """List of available MXM effects (built-in, verified)."""
     return json.dumps({
-        "note": "Only effects listed as supported have complete LMMS 1.3 "
+        "note": "Only effects listed as supported have complete MXM 1.3 "
                 "control serialization. Never enable an effect that cannot "
                 "serialize a full control block. External-host effects "
                 "(ladspaeffect, lv2effect, vsteffect) depend on system plugins.",
@@ -3527,7 +3551,11 @@ def resource_effects() -> str:
     }, indent=2)
 
 
-@mcp.resource("lmms://reference/note_names")
+@mcp.resource("mxm://reference/note_names")
+@mcp.resource(
+    "lmms://reference/note_names",
+    description=_LEGACY_NOTE.format("reference/note_names"),
+)
 def resource_note_names() -> str:
     """MIDI note number to note name mapping reference."""
     mapping = []
@@ -3539,7 +3567,11 @@ def resource_note_names() -> str:
     return json.dumps({"mapping": mapping, "total": 128}, indent=2)
 
 
-@mcp.resource("lmms://reference/scales")
+@mcp.resource("mxm://reference/scales")
+@mcp.resource(
+    "lmms://reference/scales",
+    description=_LEGACY_NOTE.format("reference/scales"),
+)
 def resource_scales() -> str:
     """Available musical scales and their intervals."""
     return json.dumps({
@@ -3588,7 +3620,7 @@ Steps:
 7. Configure mixer channels
 8. Save the project
 
-Use the LMMS MCP tools to build this song step by step."""
+Use the MXM MCP tools to build this song step by step."""
 
 
 @mcp.prompt()
@@ -3729,7 +3761,7 @@ Steps:
 
 
 def main():
-    """Run the LMMS MCP server."""
+    """Run the MXM MCP server."""
     mcp.run()
 
 

@@ -6,7 +6,7 @@ import asyncio
 import json
 import pytest
 
-from lmms_mcp import server, lv2 as lv2_mod, vst3 as vst3_mod
+from mxm_mcp import server, lv2 as lv2_mod, vst3 as vst3_mod
 
 
 def _make_synthetic_lv2_plugin(

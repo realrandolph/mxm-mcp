@@ -3,8 +3,8 @@
 **Issue:** `realrandolph/mxm-mcp#11` — *Add deterministic musical-unit composition and editing operations*
 **Branch:** `feat/musical-unit-composition-11`
 **Status:** Test contract and current coverage. The pure layer
-(`src/lmms_mcp/musical_units.py`) and the placement layer
-(`src/lmms_mcp/composition.py`) are present in the working tree. Suites A–H are
+(`src/mxm_mcp/musical_units.py`) and the placement layer
+(`src/mxm_mcp/composition.py`) are present in the working tree. Suites A–H are
 materialized; Suites I–L and the gap tests in §18 remain to be written.
 **Owner:** QA / audio software test engineering
 
@@ -110,16 +110,16 @@ not the assertions.
 
 | Module | Responsibility | Test file |
 |---|---|---|
-| `lmms_mcp/musical_units.py` | **Implemented.** Pure parsing, validation, transformation. No XML, no I/O. | `tests/test_musical_units.py` |
-| `lmms_mcp/composition.py` | **Implemented (working tree).** Project placement, preview/apply, arrangement, automation editing. | `tests/test_composition_ops.py` |
-| `lmms_mcp/server.py` | **Implemented.** MCP wrappers `add_phrase`, `add_chord`, `add_progression`, `add_rhythm`, `arrange_musical_units`, `edit_notes_batch`, `add_automation_batch`, `edit_automation`. | `tests/test_composition_mcp.py` |
+| `mxm_mcp/musical_units.py` | **Implemented.** Pure parsing, validation, transformation. No XML, no I/O. | `tests/test_musical_units.py` |
+| `mxm_mcp/composition.py` | **Implemented (working tree).** Project placement, preview/apply, arrangement, automation editing. | `tests/test_composition_ops.py` |
+| `mxm_mcp/server.py` | **Implemented.** MCP wrappers `add_phrase`, `add_chord`, `add_progression`, `add_rhythm`, `arrange_musical_units`, `edit_notes_batch`, `add_automation_batch`, `edit_automation`. | `tests/test_composition_mcp.py` |
 | persistence | Existing `xml_parser.save_project` / `load_project`. | `tests/test_composition_roundtrip.py` |
 
 Target imports used throughout the outline (adjust here only if the implementation
 picks different names):
 
 ```python
-from lmms_mcp.musical_units import (
+from mxm_mcp.musical_units import (
     MusicalUnitError, parse_pitch, parse_time, parse_duration,
     parse_chord_symbol, parse_chord_spec, chord_pitches, chord_names,
     parse_phrase, parse_progression, parse_rhythm_pattern,
@@ -127,12 +127,12 @@ from lmms_mcp.musical_units import (
     quantize_notes, scale_velocity, apply_transforms,
     reverse_automation_points,
 )
-from lmms_mcp.composition import (
+from mxm_mcp.composition import (
     place_phrase, place_chord, place_chords, place_progression,
     place_rhythm, arrange_units, edit_notes,
     edit_automation, add_automation_batch,
 )
-from lmms_mcp import server
+from mxm_mcp import server
 ```
 
 ### 1.2 Canonical clip representation
@@ -320,8 +320,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from lmms_mcp.project import LMMSProject
-from lmms_mcp.xml_parser import find_tracks
+from mxm_mcp.project import LMMSProject
+from mxm_mcp.xml_parser import find_tracks
 
 
 @pytest.fixture
@@ -1411,7 +1411,7 @@ both cases and that the AFP sample path survives placement.
 
 ```python
 def test_rhythm_on_afp_track_preserves_sample(song, tmp_path):
-    from lmms_mcp.xml_parser import set_audiofileprocessor_sample
+    from mxm_mcp.xml_parser import set_audiofileprocessor_sample
 
     song.add_track("instrument", "Kick", instrument="audiofileprocessor")
     idx = len(find_tracks(song.root)) - 1
@@ -2323,19 +2323,19 @@ are already handled in `musical_units.py`; the test still exists as a regression
 20. **FIXED — import drift while the layer was edited**: `composition.py`
     imported `transform_notes` after the pure module renamed it to
     `apply_transforms` / `transpose_notes`. Keep the guard: a test run begins with
-    `uv run python -c "import lmms_mcp.composition"` so collection failures are
+    `uv run python -c "import mxm_mcp.composition"` so collection failures are
     reported as build breaks, not as musical failures.
 
 ### 18.1 Concrete reproduction commands
 
 ```bash
-uv run python -c "from lmms_mcp.musical_units import *; print(chord_pitches(parse_chord_symbol('C47')))"
+uv run python -c "from mxm_mcp.musical_units import *; print(chord_pitches(parse_chord_symbol('C47')))"
 # [60, 64, 67, 70]
 
-uv run python -c "from lmms_mcp.musical_units import *; print(chord_pitches(parse_chord_symbol('C4maj/B4')))"
+uv run python -c "from mxm_mcp.musical_units import *; print(chord_pitches(parse_chord_symbol('C4maj/B4')))"
 # [60, 64, 67, 71]  (bass B is not lowest; expected B below C)
 
-uv run python -c "from lmms_mcp.musical_units import *; print(parse_phrase({'notes':[{'key':60,'pitch':'D4','pos':0,'length':48}]}).notes)"
+uv run python -c "from mxm_mcp.musical_units import *; print(parse_phrase({'notes':[{'key':60,'pitch':'D4','pos':0,'length':48}]}).notes)"
 # silently uses key 60 (expected rejection or documented precedence)
 ```
 

@@ -27,7 +27,7 @@ _pending: dict[str, "PendingPluginAccess"] = {}
 _probe_results: OrderedDict[str, dict] = OrderedDict()
 _identity_cache: dict[str, tuple[tuple[int, ...], "PluginIdentity"]] = {}
 _decision_override: ContextVar[dict[str, str]] = ContextVar(
-    "lmms_mcp_plugin_permission_override", default={}
+    "mxm_mcp_plugin_permission_override", default={}
 )
 
 
@@ -105,12 +105,33 @@ class PendingAccessError(Exception):
         }
 
 
-def _permission_file() -> Path:
+def _permission_dir() -> Path:
+    """Return the per-user config root that holds the ``*-mcp`` directories."""
     if os.name == "nt":
-        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming")
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return base / "lmms-mcp" / "native-plugin-permissions.json"
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming")
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def _canonical_permission_file() -> Path:
+    """Return the ``mxm-mcp`` consent record file this release writes."""
+    return _permission_dir() / "mxm-mcp" / "native-plugin-permissions.json"
+
+
+def _permission_file() -> Path:
+    """Return the consent record file, preferring ``mxm-mcp`` over legacy ``lmms-mcp``.
+
+    Records written by earlier releases live under the legacy ``lmms-mcp``
+    directory; they are read until the ``mxm-mcp`` file exists, so existing
+    user approvals keep working across the rename. New decisions are written to
+    ``mxm-mcp`` and carry the legacy records forward.
+    """
+    canonical = _canonical_permission_file()
+    if canonical.exists():
+        return canonical
+    legacy = _permission_dir() / "lmms-mcp" / "native-plugin-permissions.json"
+    if legacy.exists():
+        return legacy
+    return canonical
 
 
 def _read_permissions() -> dict[str, dict]:
@@ -139,7 +160,7 @@ def remember_decision(identity: PluginIdentity, decision: str) -> None:
         records[identity.key] = {"decision": decision, **identity.public()}
         # Avoid an unbounded local trust database. Oldest insertion order is pruned.
         records = dict(list(records.items())[-4096:])
-        path = _permission_file()
+        path = _canonical_permission_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix="plugin-permissions-", dir=path.parent)
         try:

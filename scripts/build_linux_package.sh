@@ -48,7 +48,7 @@ rm -rf "${PYINSTALLER_DIST}" "${PYINSTALLER_WORK}" "${PYINSTALLER_SPEC}" "${STAG
 cat >"${ENTRY_SCRIPT}" <<'PY'
 """PyInstaller entry point for the MXM MCP server."""
 
-from lmms_mcp.server import main
+from mxm_mcp.server import main
 
 if __name__ == "__main__":
     main()
@@ -78,7 +78,7 @@ fi
     --workpath "${PYINSTALLER_WORK}" \
     --specpath "${PYINSTALLER_SPEC}" \
     --paths "${ROOT_DIR}/src" \
-    --collect-all lmms_mcp \
+    --collect-all mxm_mcp \
     --collect-submodules mcp.server \
     --collect-submodules mcp.shared \
     --collect-submodules mcp.types \

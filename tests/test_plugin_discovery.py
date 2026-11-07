@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp import discovery_cache, lv2, server, vst3, vst3_presets, xml_parser
-from lmms_mcp.project import LMMSProject
+from mxm_mcp import discovery_cache, lv2, server, vst3, vst3_presets, xml_parser
+from mxm_mcp.project import LMMSProject
 
 CID = "A1B2C3D4E5F60718293A4B4C55667788"
 PLUGIN_URI = "https://example.test/plugins/fixture-synth"
@@ -120,9 +120,9 @@ def test_vst3_plugin_search_paths_include_linux_standard_and_environment(tmp_pat
 
 def test_linux_vst3_standard_paths_include_home_usr_and_local(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("lmms_mcp.vst3_platform.LINUX", True)
-    monkeypatch.setattr("lmms_mcp.vst3_platform.WINDOWS", False)
-    monkeypatch.setattr("lmms_mcp.vst3_platform.MACOS", False)
+    monkeypatch.setattr("mxm_mcp.vst3_platform.LINUX", True)
+    monkeypatch.setattr("mxm_mcp.vst3_platform.WINDOWS", False)
+    monkeypatch.setattr("mxm_mcp.vst3_platform.MACOS", False)
     dirs = vst3.standard_vst3_dirs()
     assert tmp_path / ".vst3" in dirs
     assert Path("/usr/lib/vst3") in dirs
@@ -541,19 +541,19 @@ def test_discovery_cache_path_follows_platform_conventions(monkeypatch, tmp_path
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.setattr(discovery_cache.sys, "platform", "linux")
     assert discovery_cache.cache_file_path() == (
-        home / ".cache" / "lmms-mcp" / "discovery-cache.json")
+        home / ".cache" / "mxm-mcp" / "discovery-cache.json")
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
     assert discovery_cache.cache_file_path() == (
-        tmp_path / "xdg-cache" / "lmms-mcp" / "discovery-cache.json")
+        tmp_path / "xdg-cache" / "mxm-mcp" / "discovery-cache.json")
 
     monkeypatch.setattr(discovery_cache.sys, "platform", "win32")
     assert discovery_cache.cache_file_path() == (
-        home / ".cache" / "lmms-mcp" / "discovery-cache.json")
+        home / ".cache" / "mxm-mcp" / "discovery-cache.json")
 
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-appdata"))
     assert discovery_cache.cache_file_path() == (
-        tmp_path / "local-appdata" / "lmms-mcp" / "discovery-cache.json")
+        tmp_path / "local-appdata" / "mxm-mcp" / "discovery-cache.json")
 
 
 def test_discovery_cache_survives_a_restart_and_reuses_the_index(tmp_path):

@@ -341,28 +341,6 @@ wheels = [
 ]
 
 [[package]]
-name = "lmms-mcp"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "mcp" },
-    { name = "rdflib" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mcp", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "rdflib", specifier = ">=7.0,<8" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "mcp"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -399,6 +377,28 @@ sdist = { url = "https://files.pythonhosted.org/packages/6a/dd/1c4417dc0b722c23a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/d0/242e63c510f4a17381f55b1549a3f94f5687a0595984febd2b6f87a687a0/mcp_types-2.1.1-py3-none-any.whl", hash = "sha256:26f9f7f03f2a5730717a5b98e2ab7eb640ac352d05a00cdc725c311864778295", size = 69656, upload-time = "2026-08-25T16:14:00.667Z" },
 ]
+
+[[package]]
+name = "mxm-mcp"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "mcp" },
+    { name = "rdflib" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mcp", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "rdflib", specifier = ">=7.0,<8" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "opentelemetry-api"

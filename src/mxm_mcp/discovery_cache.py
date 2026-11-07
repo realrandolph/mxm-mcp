@@ -38,17 +38,41 @@ def cache_directory() -> Path:
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA", "").strip()
         if base:
-            return Path(base) / "lmms-mcp"
+            return Path(base) / "mxm-mcp"
     else:
         base = os.environ.get("XDG_CACHE_HOME", "").strip()
         if base:
-            return Path(base) / "lmms-mcp"
-    return Path.home() / ".cache" / "lmms-mcp"
+            return Path(base) / "mxm-mcp"
+    return Path.home() / ".cache" / "mxm-mcp"
+
+
+def _legacy_cache_file_path() -> Path:
+    """Return the pre-rename ``lmms-mcp`` cache file location."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", "").strip()
+        if base:
+            return Path(base) / "lmms-mcp" / _CACHE_FILENAME
+    else:
+        base = os.environ.get("XDG_CACHE_HOME", "").strip()
+        if base:
+            return Path(base) / "lmms-mcp" / _CACHE_FILENAME
+    return Path.home() / ".cache" / "lmms-mcp" / _CACHE_FILENAME
 
 
 def cache_file_path() -> Path:
-    """Return the exact JSON file that mirrors the in-memory cache."""
-    return cache_directory() / _CACHE_FILENAME
+    """Return the exact JSON file that mirrors the in-memory cache.
+
+    The cache is written under ``mxm-mcp``. A cache file left by the earlier
+    ``lmms-mcp`` release is read once while the new file does not exist yet, so
+    upgrading does not force a full rediscovery pass.
+    """
+    current = cache_directory() / _CACHE_FILENAME
+    if current.exists():
+        return current
+    legacy = _legacy_cache_file_path()
+    if legacy.exists():
+        return legacy
+    return current
 
 
 def _stat_signature(path: Path) -> tuple[object, ...] | None:
@@ -177,10 +201,21 @@ def _snapshot_from_json(raw: object) -> tuple[tuple[object, ...], ...]:
 
 def _remove_cache_file(path: Path | None = None) -> None:
     if path is None:
+        targets = []
         try:
-            path = cache_file_path()
+            targets.append(cache_directory() / _CACHE_FILENAME)
         except (OSError, RuntimeError):
-            return
+            pass
+        try:
+            targets.append(_legacy_cache_file_path())
+        except (OSError, RuntimeError):
+            pass
+        for target in targets:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        return
     try:
         path.unlink()
     except OSError:
@@ -225,9 +260,13 @@ def _read_disk_entries() -> OrderedDict[str, tuple[tuple[tuple[object, ...], ...
 def _write_disk_entries(
     entries: OrderedDict[str, tuple[tuple[tuple[object, ...], ...], object]],
 ) -> None:
-    """Atomically replace the cache file; unsupported values stay memory-only."""
+    """Atomically replace the cache file; unsupported values stay memory-only.
+
+    Writes always target the ``mxm-mcp`` directory, so a legacy ``lmms-mcp``
+    cache read on upgrade is migrated the next time the cache is persisted.
+    """
     try:
-        path = cache_file_path()
+        path = cache_directory() / _CACHE_FILENAME
     except (OSError, RuntimeError):
         return
     if not entries:

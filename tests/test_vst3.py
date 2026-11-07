@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp import vst3, vst3_probe, xml_parser
-from lmms_mcp import vst3_platform as plat
-from lmms_mcp import server as srv
-from lmms_mcp.project import LMMSProject
-from lmms_mcp.xml_parser import (
+from mxm_mcp import vst3, vst3_probe, xml_parser
+from mxm_mcp import vst3_platform as plat
+from mxm_mcp import server as srv
+from mxm_mcp.project import LMMSProject
+from mxm_mcp.xml_parser import (
     add_instrument_track, add_note_to_track,
     configure_native_vst3_instrument, create_empty_project, find_tracks,
     load_project, save_project,
@@ -40,12 +40,12 @@ UNICODE_NAME = "テストシンセ"
 @pytest.fixture(autouse=True)
 def _isolate_mxm_build_options(monkeypatch):
     """Clear the cached MXM ``--version`` result and avoid spawning the binary."""
-    from lmms_mcp import lmms_app
+    from mxm_mcp import mxm_app
 
-    lmms_app.clear_mxm_build_options_cache()
-    monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: None)
+    mxm_app.clear_mxm_build_options_cache()
+    monkeypatch.setattr(mxm_app, "find_mxm_binary", lambda: None)
     yield
-    lmms_app.clear_mxm_build_options_cache()
+    mxm_app.clear_mxm_build_options_cache()
 
 
 class _Completed:
@@ -226,7 +226,7 @@ class TestVst3Discovery:
         link = tmp_path / "launcher" / "mxm"
         link.parent.mkdir()
         link.symlink_to(exe)
-        monkeypatch.setattr(vst3.lmms_app, "find_mxm_binary", lambda: link)
+        monkeypatch.setattr(vst3.mxm_app, "find_mxm_binary", lambda: link)
         assert vst3._app_vst3_dir() == real_bin / "vst3"
 
     def test_platform_guard_short_circuits_discovery(self, monkeypatch):
@@ -310,28 +310,28 @@ class TestVst3Discovery:
 
 class TestMxmBuildOptionsCache:
     def test_cached_and_returns_independent_dicts(self, monkeypatch):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
 
         calls = []
-        monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
-        monkeypatch.setattr(lmms_app.subprocess, "run",
+        monkeypatch.setattr(mxm_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
+        monkeypatch.setattr(mxm_app.subprocess, "run",
                             lambda *a, **k: calls.append(a) or _Completed(
                                 "MXM_HAVE_VST3='TRUE'\nWANT_VST3='ON'\n"))
-        first = lmms_app.get_mxm_build_options()
+        first = mxm_app.get_mxm_build_options()
         first["have_vst3"] = False
-        second = lmms_app.get_mxm_build_options()
+        second = mxm_app.get_mxm_build_options()
         assert second["have_vst3"] is True and second.get("vst3") is True
         assert len(calls) == 1
 
     def test_support_requires_compiled_host_not_want(self, monkeypatch):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
 
-        monkeypatch.setattr(lmms_app, "get_mxm_build_options",
+        monkeypatch.setattr(mxm_app, "get_mxm_build_options",
                             lambda: {"vst3": True, "have_vst3": False})
-        assert lmms_app.mxm_supports_native_vst3() is False
-        monkeypatch.setattr(lmms_app, "get_mxm_build_options",
+        assert mxm_app.mxm_supports_native_vst3() is False
+        monkeypatch.setattr(mxm_app, "get_mxm_build_options",
                             lambda: {"have_vst3": True})
-        assert lmms_app.mxm_supports_native_vst3() is True
+        assert mxm_app.mxm_supports_native_vst3() is True
 
 
 class TestVst3Platform:

@@ -1,10 +1,10 @@
-"""Tests for lmms_mcp.composition placement, arrangement, and automation operations."""
+"""Tests for mxm_mcp.composition placement, arrangement, and automation operations."""
 
 from __future__ import annotations
 
 import pytest
 
-from lmms_mcp.composition import (
+from mxm_mcp.composition import (
     add_automation_batch,
     arrange_units,
     edit_automation,
@@ -15,13 +15,13 @@ from lmms_mcp.composition import (
     place_progression,
     place_rhythm,
 )
-from lmms_mcp.musical_units import (
+from mxm_mcp.musical_units import (
     MusicalUnitError,
     parse_progression,
     reverse_automation_points,
     stretch_notes,
 )
-from lmms_mcp.xml_parser import (
+from mxm_mcp.xml_parser import (
     find_tracks,
     get_arrangement,
     resolve_automation_target,
@@ -332,7 +332,7 @@ class TestAutomationOps:
         assert pattern.get("tens") == "0.5"
 
     def test_issue11_acceptance_song(self, tmp_path):
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp.project import LMMSProject
 
         project = LMMSProject()
         project.new(bpm=128)

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lmms_mcp import plugin_permissions, server, vst3, vst3_probe
+from mxm_mcp import plugin_permissions, server, vst3, vst3_probe
 
 
 class FakeContext:

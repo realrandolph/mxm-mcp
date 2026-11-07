@@ -16,9 +16,9 @@ def test_pyinstaller_spec_has_server_entry_and_required_package_data() -> None:
     spec = read_text("packaging/mxm-mcp.spec")
     entry = read_text("packaging/mxm_mcp_entry.py")
 
-    assert "from lmms_mcp.server import main" in entry
+    assert "from mxm_mcp.server import main" in entry
     assert "carla_surge_state.b64" in spec
-    assert (ROOT / "src/lmms_mcp/carla_surge_state.b64").is_file()
+    assert (ROOT / "src/mxm_mcp/carla_surge_state.b64").is_file()
     for package in ("mcp", "rdflib", "pydantic", "anyio", "starlette"):
         assert f'"{package}"' in spec
     assert 'name="mxm-mcp"' in spec

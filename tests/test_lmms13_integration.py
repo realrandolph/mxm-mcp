@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp import lmms_app, server, xml_parser
-from lmms_mcp.project import LMMSProject
+from mxm_mcp import mxm_app, server, xml_parser
+from mxm_mcp.project import LMMSProject
 
 
-MXM_BINARY = lmms_app.find_mxm_binary()
+MXM_BINARY = mxm_app.find_mxm_binary()
 SURGE_LV2 = Path("/usr/lib/lv2/Surge XT.lv2")
 TALKINGBASS_LV2 = Path.home() / ".lv2" / "talkingbass.lv2"
 
@@ -172,7 +172,7 @@ def build_effect_controls_validation_project() -> LMMSProject:
 
 
 def _assert_complete_effect_controls(root):
-    from lmms_mcp.effects import EFFECT_SPECS
+    from mxm_mcp.effects import EFFECT_SPECS
     effects = list(root.findall(".//effect"))
     assert effects
     for effect in effects:
@@ -221,7 +221,7 @@ def _find_mxm_binary() -> Path | None:
 
 @pytest.mark.integration
 def test_mxm_native_vst3_renders_audibly(tmp_path):
-    from lmms_mcp import vst3, plugin_permissions, vst3_probe
+    from mxm_mcp import vst3, plugin_permissions, vst3_probe
 
     exe = _find_mxm_binary()
     if exe is None:

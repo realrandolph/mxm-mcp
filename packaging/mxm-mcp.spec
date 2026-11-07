@@ -9,13 +9,13 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 ROOT = Path(SPECPATH).resolve().parent
 SOURCE = ROOT / "src"
 
-# The entry wrapper invokes src/lmms_mcp/server.py as lmms_mcp.server:main.
+# The entry wrapper invokes src/mxm_mcp/server.py as mxm_mcp.server:main.
 datas = []
 for package in ("mcp", "rdflib", "pydantic"):
     datas += collect_data_files(package)
 
 datas += [
-    (str(SOURCE / "lmms_mcp" / "carla_surge_state.b64"), "lmms_mcp"),
+    (str(SOURCE / "mxm_mcp" / "carla_surge_state.b64"), "mxm_mcp"),
 ]
 
 hiddenimports = []

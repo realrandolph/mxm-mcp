@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from lmms_mcp.models import Note, midi_to_note_name, note_name_to_midi, bars_to_ticks, ticks_to_bars
-from lmms_mcp.xml_parser import create_empty_project, load_project, save_project, find_tracks, add_instrument_track, add_note_to_track, add_pattern_track, add_sample_track
-from lmms_mcp.project import LMMSProject
+from mxm_mcp.models import Note, midi_to_note_name, note_name_to_midi, bars_to_ticks, ticks_to_bars
+from mxm_mcp.xml_parser import create_empty_project, load_project, save_project, find_tracks, add_instrument_track, add_note_to_track, add_pattern_track, add_sample_track
+from mxm_mcp.project import LMMSProject
 
 
 class TestModels:
@@ -57,18 +57,18 @@ class TestXMLParser:
         assert root.find("song/timeline").get("stopbehaviour") == "1"
 
     def test_create_empty_project_uses_installed_mxm_version(self, monkeypatch):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
 
-        monkeypatch.setattr(lmms_app, "get_mxm_version", lambda: "1.0.0-alpha.1")
+        monkeypatch.setattr(mxm_app, "get_mxm_version", lambda: "1.0.0-alpha.1")
         root = create_empty_project()
 
         assert root.get("creatorversion") == "1.0.0-alpha.1"
         assert root.get("version") == "31"
 
     def test_create_empty_project_falls_back_without_mxm(self, monkeypatch):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
 
-        monkeypatch.setattr(lmms_app, "get_mxm_version", lambda: None)
+        monkeypatch.setattr(mxm_app, "get_mxm_version", lambda: None)
         root = create_empty_project()
 
         assert root.get("creatorversion") == "1.2.0"
@@ -213,13 +213,13 @@ class TestEffects:
         return root
 
     def test_known_effects_complete(self):
-        from lmms_mcp.effects import KNOWN_EFFECTS
+        from mxm_mcp.effects import KNOWN_EFFECTS
         expected = {"delay", "reverbsc", "eq", "compressor", "flanger",
                     "bassbooster", "waveshaper", "stereoenhancer"}
         assert expected.issubset(set(KNOWN_EFFECTS.keys()))
 
     def test_add_effect_to_track(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         result = add_effect(track, "delay")
@@ -229,8 +229,8 @@ class TestEffects:
     def test_track_fxchain_lives_in_instrumenttrack(self):
         """Regression: effects must go into <instrumenttrack>/<fxchain>,
         not directly under <track> - LMMS ignores the latter."""
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
@@ -241,7 +241,7 @@ class TestEffects:
         assert track.find("fxchain") is None
 
     def test_add_duplicate_effect_raises(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay")
@@ -249,21 +249,21 @@ class TestEffects:
             add_effect(track, "delay")
 
     def test_add_unknown_effect_raises(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         with pytest.raises(ValueError, match="Unknown effect"):
             add_effect(track, "greatest_reverb_9000")
 
     def test_external_effect_rejected(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         with pytest.raises(ValueError, match="external"):
             add_effect(track, "vsteffect")
 
     def test_remove_effect_by_name(self):
-        from lmms_mcp.effects import add_effect, remove_effect
+        from mxm_mcp.effects import add_effect, remove_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay")
@@ -272,7 +272,7 @@ class TestEffects:
         assert result["chain_size"] == 0
 
     def test_remove_effect_by_position(self):
-        from lmms_mcp.effects import add_effect, remove_effect
+        from mxm_mcp.effects import add_effect, remove_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay")
@@ -281,7 +281,7 @@ class TestEffects:
         assert result["removed"] == "delay"
 
     def test_list_effects(self):
-        from lmms_mcp.effects import add_effect, list_effects
+        from mxm_mcp.effects import add_effect, list_effects
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay", wet=0.7)
@@ -294,7 +294,7 @@ class TestEffects:
         assert effects[1]["enabled"] is False
 
     def test_effect_on_wet_have_unique_ids(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay")
@@ -310,7 +310,7 @@ class TestEffects:
         assert len(ids) == len(set(ids))
 
     def test_toggle_effect(self):
-        from lmms_mcp.effects import add_effect, set_effect_enabled
+        from mxm_mcp.effects import add_effect, set_effect_enabled
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "delay")
@@ -318,7 +318,7 @@ class TestEffects:
         assert result["enabled"] is False
 
     def test_fxchain_survives_roundtrip(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         root = self._make_project()
         track = find_tracks(root)[0]
         add_effect(track, "reverbsc")
@@ -412,7 +412,7 @@ class TestEffectControlSerialization:
         return find_tracks(root)[0]
 
     def _controls(self, track, name):
-        from lmms_mcp.effects import EFFECT_SPECS
+        from mxm_mcp.effects import EFFECT_SPECS
         effect = track.find("instrumenttrack/fxchain/effect") or track.find("fxchain/effect")
         assert effect is not None
         assert effect.get("name") == name
@@ -423,7 +423,7 @@ class TestEffectControlSerialization:
         return controls
 
     def test_every_supported_effect_has_complete_nondefault_state(self):
-        from lmms_mcp.effects import EFFECT_SPECS, add_effect
+        from mxm_mcp.effects import EFFECT_SPECS, add_effect
         for name, spec in EFFECT_SPECS.items():
             root = create_empty_project()
             add_instrument_track(root, name)
@@ -445,7 +445,7 @@ class TestEffectControlSerialization:
             assert result["controls"][spec.params[0].name]
 
     def test_canonical_keys_match_lmms_saved_effects(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         for name, keys in self.CANONICAL_KEYS.items():
             track = self._track()
             add_effect(track, name)
@@ -453,7 +453,7 @@ class TestEffectControlSerialization:
             assert keys <= set(controls.attrib)
 
     def test_delay_and_flanger_write_tempo_sync_attrs(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         track = self._track()
         add_effect(track, "delay", params={"DelayTimeSamples": 0.33})
         delay = self._controls(track, "delay")
@@ -464,7 +464,7 @@ class TestEffectControlSerialization:
     def test_waveshaper_and_dynamics_use_200_point_transfer(self):
         import base64
         import struct
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         for name in ("waveshaper", "dynamicsprocessor"):
             track = self._track()
             add_effect(track, name)
@@ -474,19 +474,19 @@ class TestEffectControlSerialization:
             assert samples[-1] == pytest.approx(1.0)
 
     def test_unknown_parameter_is_rejected(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         track = self._track()
         with pytest.raises(ValueError, match="Unknown delay parameter"):
             add_effect(track, "delay", params={"not_a_real_knob": 1})
 
     def test_out_of_range_parameter_is_rejected(self):
-        from lmms_mcp.effects import add_effect
+        from mxm_mcp.effects import add_effect
         track = self._track()
         with pytest.raises(ValueError, match="below minimum"):
             add_effect(track, "reverbsc", params={"size": -1})
 
     def test_describe_effects_lists_parameters(self):
-        from lmms_mcp.effects import describe_effects
+        from mxm_mcp.effects import describe_effects
         catalog = describe_effects()
         names = {item["name"] for item in catalog["supported"]}
         assert "dynamicsprocessor" in names
@@ -514,7 +514,7 @@ class TestZynAddSubFX:
     )
 
     def test_embed_preset(self):
-        from lmms_mcp.xml_parser import embed_zyn_preset
+        from mxm_mcp.xml_parser import embed_zyn_preset
         root = self._make_zyn_project()
         result = embed_zyn_preset(root, 0, self.ZYN_PRESET_XML)
         assert result["preset"] == "TestPatch"
@@ -523,26 +523,26 @@ class TestZynAddSubFX:
         assert data.tag == "ZynAddSubFX-data"
 
     def test_embed_preset_wrong_instrument(self):
-        from lmms_mcp.xml_parser import embed_zyn_preset
+        from mxm_mcp.xml_parser import embed_zyn_preset
         root = create_empty_project()
         add_instrument_track(root, "Not Zyn")  # tripleoscillator default
         with pytest.raises(ValueError, match="not 'zynaddsubfx'"):
             embed_zyn_preset(root, 0, self.ZYN_PRESET_XML)
 
     def test_embed_invalid_xml(self):
-        from lmms_mcp.xml_parser import embed_zyn_preset
+        from mxm_mcp.xml_parser import embed_zyn_preset
         root = self._make_zyn_project()
         with pytest.raises(ValueError, match="Invalid preset XML"):
             embed_zyn_preset(root, 0, "<not-valid-xml")
 
     def test_embed_wrong_root_element(self):
-        from lmms_mcp.xml_parser import embed_zyn_preset
+        from mxm_mcp.xml_parser import embed_zyn_preset
         root = self._make_zyn_project()
         with pytest.raises(ValueError, match="expected"):
             embed_zyn_preset(root, 0, "<something-else/>")
 
     def test_set_instrument_params(self):
-        from lmms_mcp.xml_parser import set_instrument_params
+        from mxm_mcp.xml_parser import set_instrument_params
         root = self._make_zyn_project()
         result = set_instrument_params(
             root, 0, {"filterfreq": 100, "portamento": 30}
@@ -552,13 +552,13 @@ class TestZynAddSubFX:
         assert inst.get("filterfreq") == "100"
 
     def test_set_params_out_of_range_track(self):
-        from lmms_mcp.xml_parser import set_instrument_params
+        from mxm_mcp.xml_parser import set_instrument_params
         root = self._make_zyn_project()
         with pytest.raises(ValueError, match="out of range"):
             set_instrument_params(root, 99, {"portamento": 10})
 
     def test_find_track_element_range_check(self):
-        from lmms_mcp.xml_parser import find_track_element
+        from mxm_mcp.xml_parser import find_track_element
         root = self._make_zyn_project()
         with pytest.raises(ValueError, match="out of range"):
             find_track_element(root, 5)
@@ -574,20 +574,20 @@ class TestArrangement:
         return root
 
     def test_place_instrument_pattern(self):
-        from lmms_mcp.xml_parser import place_instrument_pattern
+        from mxm_mcp.xml_parser import place_instrument_pattern
         root = self._project_with_tracks()
         pattern = place_instrument_pattern(root, 0, position=768, name="Drop")
         assert pattern.get("pos") == "768"
         assert pattern.get("name") == "Drop"
 
     def test_place_pattern_wrong_track_type(self):
-        from lmms_mcp.xml_parser import place_instrument_pattern
+        from mxm_mcp.xml_parser import place_instrument_pattern
         root = self._project_with_tracks()
         with pytest.raises(ValueError, match="not an instrument track"):
             place_instrument_pattern(root, 1, position=0)
 
     def test_add_sample_clip(self):
-        from lmms_mcp.xml_parser import add_sample_track, add_sample_clip
+        from mxm_mcp.xml_parser import add_sample_track, add_sample_clip
         root = self._project_with_tracks()
         add_sample_track(root, "FX")
         clip = add_sample_clip(root, 2, "drums/kick01.ogg", 192, 384)
@@ -595,13 +595,13 @@ class TestArrangement:
         assert clip.get("pos") == "192"
 
     def test_add_sample_clip_requires_sample_track(self):
-        from lmms_mcp.xml_parser import add_sample_clip
+        from mxm_mcp.xml_parser import add_sample_clip
         root = self._project_with_tracks()
         with pytest.raises(ValueError, match="not a sample track"):
             add_sample_clip(root, 0, "test.wav")
 
     def test_get_arrangement_sorted(self):
-        from lmms_mcp.xml_parser import (
+        from mxm_mcp.xml_parser import (
             place_instrument_pattern, add_bb_clip, get_arrangement,
             add_sample_track, add_sample_clip,
         )
@@ -618,7 +618,7 @@ class TestArrangement:
         assert positions == sorted(positions)
 
     def test_move_and_delete_clip(self):
-        from lmms_mcp.xml_parser import (
+        from mxm_mcp.xml_parser import (
             place_instrument_pattern, move_clip, delete_clip, get_arrangement,
         )
         root = self._project_with_tracks()
@@ -631,7 +631,7 @@ class TestArrangement:
         assert len(get_arrangement(root)) == 0
 
     def test_move_nonexistent_clip(self):
-        from lmms_mcp.xml_parser import move_clip
+        from mxm_mcp.xml_parser import move_clip
         root = self._project_with_tracks()
         with pytest.raises(ValueError, match="No clip found"):
             move_clip(root, 0, 999, 100)
@@ -646,7 +646,7 @@ class TestAutomation:
         return root
 
     def test_automate_attribute_creates_element(self):
-        from lmms_mcp.xml_parser import automate_attribute
+        from mxm_mcp.xml_parser import automate_attribute
         root = self._root()
         track = find_tracks(root)[0]
         inst = track.find("instrumenttrack")
@@ -658,7 +658,7 @@ class TestAutomation:
         assert "vol" not in inst.attrib
 
     def test_automate_attribute_idempotent(self):
-        from lmms_mcp.xml_parser import automate_attribute
+        from mxm_mcp.xml_parser import automate_attribute
         root = self._root()
         track = find_tracks(root)[0]
         inst = track.find("instrumenttrack")
@@ -668,7 +668,7 @@ class TestAutomation:
         assert len(inst.findall("vol")) == 1
 
     def test_add_automation_track(self):
-        from lmms_mcp.xml_parser import add_automation_track
+        from mxm_mcp.xml_parser import add_automation_track
         root = self._root()
         track = add_automation_track(
             root, "Ramp", [(0, 120), (1536, 140)], target_id=42
@@ -682,13 +682,13 @@ class TestAutomation:
         assert obj.get("id") == "42"
 
     def test_add_automation_track_empty_points(self):
-        from lmms_mcp.xml_parser import add_automation_track
+        from mxm_mcp.xml_parser import add_automation_track
         root = self._root()
         with pytest.raises(ValueError, match="At least one point"):
             add_automation_track(root, "Empty", [])
 
     def test_resolve_song_target(self):
-        from lmms_mcp.xml_parser import resolve_automation_target
+        from mxm_mcp.xml_parser import resolve_automation_target
         root = self._root()
         model_id, value = resolve_automation_target(root, "song", 0, "tempo")
         assert value == 140.0
@@ -698,7 +698,7 @@ class TestAutomation:
         assert bpm_el.get("id") == str(model_id)
 
     def test_resolve_track_volume(self):
-        from lmms_mcp.xml_parser import resolve_automation_target
+        from mxm_mcp.xml_parser import resolve_automation_target
         root = self._root()
         model_id, value = resolve_automation_target(
             root, "track", 0, "volume"
@@ -708,20 +708,20 @@ class TestAutomation:
         assert inst.find("vol").get("id") == str(model_id)
 
     def test_resolve_invalid_param(self):
-        from lmms_mcp.xml_parser import resolve_automation_target
+        from mxm_mcp.xml_parser import resolve_automation_target
         root = self._root()
         with pytest.raises(ValueError, match="Unknown song parameter"):
             resolve_automation_target(root, "song", 0, "nonexistent")
 
     def test_resolve_mixer_out_of_range(self):
-        from lmms_mcp.xml_parser import resolve_automation_target
+        from mxm_mcp.xml_parser import resolve_automation_target
         root = self._root()
         with pytest.raises(ValueError, match="out of range"):
             resolve_automation_target(root, "mixer", 99, "volume")
 
     def test_full_automation_roundtrip(self):
         """Automation must survive .mmpz save/load with intact ID links."""
-        from lmms_mcp.xml_parser import (
+        from mxm_mcp.xml_parser import (
             resolve_automation_target, add_automation_track,
         )
         root = self._root()
@@ -754,32 +754,32 @@ class TestMxmApp:
     """Tests for installed-MXM detection."""
 
     def test_find_binary(self):
-        from lmms_mcp import lmms_app
-        binary = lmms_app.find_mxm_binary()
+        from mxm_mcp import mxm_app
+        binary = mxm_app.find_mxm_binary()
         # On the dev machine MXM is installed; skip elsewhere
         if binary is None:
             pytest.skip("MXM not installed")
         assert binary.is_file()
 
     def test_configured_binary_wins(self, monkeypatch, tmp_path):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         binary = tmp_path / "mxm"
         binary.write_bytes(b"#!/bin/true\n")
         monkeypatch.setenv("MXM_EXECUTABLE", str(binary))
-        assert lmms_app.find_mxm_binary() == binary
+        assert mxm_app.find_mxm_binary() == binary
         # A configured path that is not a file is ignored, never returned
         monkeypatch.setenv("MXM_EXECUTABLE", str(tmp_path / "nope"))
-        assert lmms_app.find_mxm_binary() != tmp_path / "nope"
+        assert mxm_app.find_mxm_binary() != tmp_path / "nope"
 
     def test_no_lmms_binary_detection(self):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         # The inherited LMMS/MXM executable detectors must be gone
-        assert not hasattr(lmms_app, "find_lmms_exe")
-        assert not hasattr(lmms_app, "find_mxm_exe")
+        assert not hasattr(mxm_app, "find_lmms_exe")
+        assert not hasattr(mxm_app, "find_mxm_exe")
 
     def test_plugins_dir_from_binary_prefix(self, monkeypatch, tmp_path):
         """An MXM-only install (bin/mxm + lib/mxm) is detected without LMMS."""
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         binary = tmp_path / "bin" / "mxm"
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"#!/bin/true\n")
@@ -788,66 +788,66 @@ class TestMxmApp:
         (plugins / "libtripleoscillator.so").write_bytes(b"\x7fELF")
         monkeypatch.setenv("MXM_EXECUTABLE", str(binary))
         monkeypatch.delenv("MXM_PLUGIN_DIR", raising=False)
-        assert lmms_app.get_plugins_dir() == plugins
-        assert "tripleoscillator" in lmms_app.get_installed_plugins()
+        assert mxm_app.get_plugins_dir() == plugins
+        assert "tripleoscillator" in mxm_app.get_installed_plugins()
 
     def test_plugin_dir_env_override(self, monkeypatch, tmp_path):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         plugins = tmp_path / "custom-plugins"
         plugins.mkdir()
         (plugins / "libcustomfx.so").write_bytes(b"\x7fELF")
         monkeypatch.setenv("MXM_PLUGIN_DIR", str(plugins))
-        assert lmms_app.get_plugins_dir() == plugins
-        assert "customfx" in lmms_app.get_installed_plugins()
+        assert mxm_app.get_plugins_dir() == plugins
+        assert "customfx" in mxm_app.get_installed_plugins()
 
     def test_get_mxm_version_preserves_prerelease_and_build(self, monkeypatch):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
 
         class Completed:
             stdout = "MXM 1.0.0-alpha.1.1034+4e677cb\n"
             stderr = ""
 
-        monkeypatch.setattr(lmms_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
-        monkeypatch.setattr(lmms_app.subprocess, "run", lambda *args, **kwargs: Completed())
+        monkeypatch.setattr(mxm_app, "find_mxm_binary", lambda: Path("/fake/mxm"))
+        monkeypatch.setattr(mxm_app.subprocess, "run", lambda *args, **kwargs: Completed())
 
-        assert lmms_app.get_mxm_version() == "1.0.0-alpha.1.1034+4e677cb"
+        assert mxm_app.get_mxm_version() == "1.0.0-alpha.1.1034+4e677cb"
 
     def test_check_plugin_known_builtin(self):
-        from lmms_mcp import lmms_app
-        ok, _ = lmms_app.check_plugin_available("tripleoscillator")
+        from mxm_mcp import mxm_app
+        ok, _ = mxm_app.check_plugin_available("tripleoscillator")
         assert ok is True
 
     def test_check_static_plugin(self):
-        from lmms_mcp import lmms_app
-        ok, reason = lmms_app.check_plugin_available("freeboy")
+        from mxm_mcp import mxm_app
+        ok, reason = mxm_app.check_plugin_available("freeboy")
         assert ok is True
         assert "built-in" in reason
 
     def test_check_plugin_matches_dll_reality(self):
         """check_plugin_available must agree with the actual plugins dir."""
-        from lmms_mcp import lmms_app
-        if lmms_app.find_mxm_binary() is None:
+        from mxm_mcp import mxm_app
+        if mxm_app.find_mxm_binary() is None:
             pytest.skip("MXM not installed")
-        installed = lmms_app.get_installed_plugins()
+        installed = mxm_app.get_installed_plugins()
         # slicert: available iff its plugin library exists (user may add/remove it)
-        ok, _ = lmms_app.check_plugin_available("slicert")
+        ok, _ = mxm_app.check_plugin_available("slicert")
         assert ok == ("slicert" in installed)
 
     def test_check_unknown_plugin_reports_missing(self):
-        from lmms_mcp import lmms_app
-        if lmms_app.find_mxm_binary() is None:
+        from mxm_mcp import mxm_app
+        if mxm_app.find_mxm_binary() is None:
             pytest.skip("MXM not installed")
-        ok, reason = lmms_app.check_plugin_available(
+        ok, reason = mxm_app.check_plugin_available(
             "definitely_not_a_real_plugin_12345"
         )
         assert ok is False
         assert "not included" in reason
 
     def test_classify_plugins(self):
-        from lmms_mcp import lmms_app
-        if lmms_app.find_mxm_binary() is None:
+        from mxm_mcp import mxm_app
+        if mxm_app.find_mxm_binary() is None:
             pytest.skip("MXM not installed")
-        result = lmms_app.classify_installed_plugins(
+        result = mxm_app.classify_installed_plugins(
             {"tripleoscillator"}, {"delay"}
         )
         assert "tripleoscillator" in result["instruments"]
@@ -856,13 +856,13 @@ class TestMxmApp:
         all_names = (
             result["instruments"] + result["effects"] + result["unknown"]
         )
-        installed = lmms_app.get_installed_plugins()
+        installed = mxm_app.get_installed_plugins()
         for name in installed:
             if not name.startswith("lib"):
                 assert name in all_names
 
     def test_find_vst_plugins(self):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             dll = Path(tmp) / "fakevst.dll"
@@ -870,16 +870,16 @@ class TestMxmApp:
             (Path(tmp) / "sub").mkdir()
             nested = Path(tmp) / "sub" / "nested.dll"
             nested.write_bytes(b"MZ fake")
-            results = lmms_app.find_vst_plugins(tmp)
+            results = mxm_app.find_vst_plugins(tmp)
             assert len(results) == 2
-            shallow = lmms_app.find_vst_plugins(tmp, recursive=False)
+            shallow = mxm_app.find_vst_plugins(tmp, recursive=False)
             assert len(shallow) == 1
             assert shallow[0]["name"] == "fakevst"
 
     def test_find_vst_plugins_missing_dir(self):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         with pytest.raises(ValueError, match="not found"):
-            lmms_app.find_vst_plugins("Z:/no/such/dir")
+            mxm_app.find_vst_plugins("Z:/no/such/dir")
 
 
 class TestMxmAppConfiguration:
@@ -902,7 +902,7 @@ class TestMxmAppConfiguration:
     )
 
     def test_source_has_no_lmms_application_interfaces(self):
-        package = Path(__file__).resolve().parents[1] / "src" / "lmms_mcp"
+        package = Path(__file__).resolve().parents[1] / "src" / "mxm_mcp"
         offenders = []
         for source in sorted(package.rglob("*.py")):
             text = source.read_text(encoding="utf-8")
@@ -924,26 +924,26 @@ class TestMxmAppConfiguration:
         assert offenders == []
 
     def test_tool_is_named_get_mxm_info(self):
-        from lmms_mcp import server as srv
+        from mxm_mcp import server as srv
         assert hasattr(srv, "get_mxm_info")
         assert not hasattr(srv, "get_lmms_info")
 
     def test_list_available_plugins_reports_mxm_found(self):
-        from lmms_mcp import server as srv
+        from mxm_mcp import server as srv
         result = json.loads(srv.list_available_plugins())
         assert "mxm_found" in result
         assert "lmms_found" not in result
 
     def test_projects_dir_env_override(self, monkeypatch, tmp_path):
-        from lmms_mcp import server as srv
+        from mxm_mcp import server as srv
         monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
         assert srv._default_projects_dir() == tmp_path
         monkeypatch.delenv("MXM_PROJECTS_DIR", raising=False)
         assert srv._default_projects_dir() == Path.cwd()
 
     def test_relative_save_uses_configured_projects_dir(self, monkeypatch, tmp_path):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         monkeypatch.setenv("MXM_PROJECTS_DIR", str(tmp_path))
         proj = LMMSProject()
         proj.new()
@@ -958,8 +958,8 @@ class TestCustomPluginsAndVst:
 
     def test_custom_plugin_accepted(self, monkeypatch, tmp_path):
         """A plugin library in the MXM plugins dir is accepted by name."""
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         plugins = tmp_path / "plugins"
         plugins.mkdir()
         (plugins / "libacmeinstrument.so").write_bytes(b"\x7fELF")
@@ -973,8 +973,8 @@ class TestCustomPluginsAndVst:
         assert response.get("custom_plugin") is True
 
     def test_unknown_plugin_rejected(self):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
@@ -984,8 +984,8 @@ class TestCustomPluginsAndVst:
         assert "error" in response
 
     def test_add_vst_track_sets_plugin_path(self, tmp_path):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
@@ -1000,8 +1000,8 @@ class TestCustomPluginsAndVst:
         assert vestige_el.get("plugin", "").lower().endswith(".dll")
 
     def test_add_vst_track_missing_file(self):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
@@ -1011,7 +1011,7 @@ class TestCustomPluginsAndVst:
         assert "error" in response
 
     def test_find_linux_plugins(self):
-        from lmms_mcp import lmms_app
+        from mxm_mcp import mxm_app
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1019,13 +1019,13 @@ class TestCustomPluginsAndVst:
             (root / "Surge XT.clap").write_bytes(b"plugin")
             (root / "lsp.lv2").mkdir()
             (root / "ZamComp.so").write_bytes(b"plugin")
-            found = lmms_app.find_linux_plugins(root)
+            found = mxm_app.find_linux_plugins(root)
             assert {p["type"] for p in found} == {"vst3", "clap", "lv2", "ladspa"}
 
     def test_native_surge_lv2_round_trip(self):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
-        from lmms_mcp import xml_parser
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
+        from mxm_mcp import xml_parser
         proj = LMMSProject()
         proj.new()
         srv.set_project(proj)
@@ -1054,14 +1054,14 @@ class TestCustomPluginsAndVst:
             assert loaded.find(".//track[@name='Surge']/midiclip/note").get("key") == "60"
 
     def test_native_lv2_instrument_requires_uri(self):
-        from lmms_mcp.xml_parser import configure_native_lv2_instrument
+        from mxm_mcp.xml_parser import configure_native_lv2_instrument
         root = create_empty_project()
         track = add_instrument_track(root, "LV2", instrument="lv2instrument")
         with pytest.raises(ValueError, match="require.*URI"):
             configure_native_lv2_instrument(track, "not-a-uri")
 
     def test_carla_rejects_unknown_plugin_identifier(self):
-        from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
+        from mxm_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
         import tempfile
         root = create_empty_project()
         add_instrument_track(root, "Carla", instrument="carlarack")
@@ -1072,7 +1072,7 @@ class TestCustomPluginsAndVst:
                 load_carla_plugin(root, 0, plugin)
 
     def test_carla_rejects_surge_vst3_and_clap(self):
-        from lmms_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
+        from mxm_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
         root = create_empty_project()
         add_instrument_track(root, "Carla", instrument="carlarack")
         with tempfile.TemporaryDirectory() as tmp:
@@ -1085,7 +1085,7 @@ class TestCustomPluginsAndVst:
                     load_carla_plugin(root, 0, plugin)
 
     def test_carla_regression_fixture_contains_reference_state_and_note(self):
-        from lmms_mcp import xml_parser
+        from mxm_mcp import xml_parser
         fixture = Path(__file__).parent / "fixtures" / "carla_surge_regression.mmp"
         root = xml_parser.load_project(fixture)
         state = root.find(".//CARLA-PROJECT")
@@ -1101,7 +1101,7 @@ class TestCustomPluginsAndVst:
         assert note.get("key") == "60"
 
     def test_linux_effect_serialization(self):
-        from lmms_mcp.effects import add_external_effect
+        from mxm_mcp.effects import add_external_effect
         root = create_empty_project()
         add_instrument_track(root, "Lead")
         track = find_tracks(root)[0].find("instrumenttrack")
@@ -1114,8 +1114,8 @@ class TestCustomPluginsAndVst:
         assert effect.find("on").get("id") != effect.find("wet").get("id")
 
     def test_talkingbass_rejected_as_lv2effect(self):
-        from lmms_mcp.effects import add_external_effect
-        from lmms_mcp.xml_parser import TALKINGBASS_LV2_URI
+        from mxm_mcp.effects import add_external_effect
+        from mxm_mcp.xml_parser import TALKINGBASS_LV2_URI
         root = create_empty_project()
         add_instrument_track(root, "Lead")
         track = find_tracks(root)[0].find("instrumenttrack")
@@ -1123,9 +1123,9 @@ class TestCustomPluginsAndVst:
             add_external_effect(track, "lv2effect", {"uri": TALKINGBASS_LV2_URI})
 
     def test_talking_bass_track_hosts_native_lv2(self, tmp_path, monkeypatch):
-        from lmms_mcp import server as srv
-        from lmms_mcp.project import LMMSProject
-        from lmms_mcp import xml_parser
+        from mxm_mcp import server as srv
+        from mxm_mcp.project import LMMSProject
+        from mxm_mcp import xml_parser
         (tmp_path / "talkingbass.so").write_bytes(b"plugin")
         monkeypatch.setattr(xml_parser, "TALKINGBASS_LV2_BUNDLE", str(tmp_path))
         proj = LMMSProject()
@@ -1149,7 +1149,7 @@ class TestSilenceRegressions:
         """LMMS deletes the implicit send-to-master when allocating
         channels on load (Mixer::allocateChannelsTo) - without an
         explicit <send> element every sub-channel renders silent."""
-        from lmms_mcp.xml_parser import add_mixer_channel
+        from mxm_mcp.xml_parser import add_mixer_channel
         root = create_empty_project()
         ch = add_mixer_channel(root, "Drums")
         send = ch.find("send")
@@ -1158,7 +1158,7 @@ class TestSilenceRegressions:
         assert float(send.get("amount")) > 0
 
     def test_master_routing_repairs_missing_and_zero_sends(self):
-        from lmms_mcp.xml_parser import add_mixer_channel, ensure_master_routing
+        from mxm_mcp.xml_parser import add_mixer_channel, ensure_master_routing
         root = create_empty_project()
         missing = add_mixer_channel(root, "Missing")
         missing.remove(missing.find("send"))
@@ -1199,14 +1199,14 @@ class TestSilenceRegressions:
         assert isinstance(bars_to_ticks(2.5), int)
         root = create_empty_project()
         add_instrument_track(root, "Lead")
-        from lmms_mcp.xml_parser import place_instrument_pattern
+        from mxm_mcp.xml_parser import place_instrument_pattern
         pat = place_instrument_pattern(root, 0, position=bars_to_ticks(8.0),
                                        length=bars_to_ticks(16.0))
         assert pat.get("pos") == "1536"
         assert pat.get("len") == "3072"
 
     def test_move_and_delete_clip_tolerate_float_strings(self):
-        from lmms_mcp.xml_parser import (
+        from mxm_mcp.xml_parser import (
             place_instrument_pattern, move_clip, delete_clip,
         )
         root = create_empty_project()
@@ -1233,7 +1233,7 @@ class TestSilenceRegressions:
     def test_add_note_target_specific_pattern(self):
         root = create_empty_project()
         add_instrument_track(root, "Lead")
-        from lmms_mcp.xml_parser import place_instrument_pattern
+        from mxm_mcp.xml_parser import place_instrument_pattern
         place_instrument_pattern(root, 0, position=384, name="Bar3")
         place_instrument_pattern(root, 0, position=768, name="Bar5")
         add_note_to_track(root, 0, key=60, pos=48, length=48,
@@ -1248,7 +1248,7 @@ class TestSilenceRegressions:
         """Compressed qCompress bytes inside .mmp are unreadable for
         LMMS/tooling - saving must follow the file extension."""
         import tempfile
-        from lmms_mcp.project import LMMSProject
+        from mxm_mcp.project import LMMSProject
         proj = LMMSProject()
         proj.new()
         proj.add_track("instrument", "T")
@@ -1271,7 +1271,7 @@ class TestRoutingAndTalkingBass:
         assert st.get("vol") == "90"
 
     def test_set_track_mixer_channel_sample_and_instrument(self):
-        from lmms_mcp.xml_parser import set_track_mixer_channel
+        from mxm_mcp.xml_parser import set_track_mixer_channel
         root = create_empty_project()
         add_instrument_track(root, "Bass", mixer_channel=0)
         add_sample_track(root, "Snare", mixer_channel=0)
@@ -1281,7 +1281,7 @@ class TestRoutingAndTalkingBass:
         assert find_tracks(root)[1].find("sampletrack").get("mixch") == "4"
 
     def test_set_audiofileprocessor_sample(self):
-        from lmms_mcp.xml_parser import set_audiofileprocessor_sample
+        from mxm_mcp.xml_parser import set_audiofileprocessor_sample
         root = create_empty_project()
         add_instrument_track(root, "Kick", instrument="audiofileprocessor")
         result = set_audiofileprocessor_sample(
@@ -1295,7 +1295,7 @@ class TestRoutingAndTalkingBass:
         assert result["src"] == "/tmp/kick.wav"
 
     def test_talking_bass_oscillator_saw_sub(self):
-        from lmms_mcp.xml_parser import configure_talking_bass_oscillator
+        from mxm_mcp.xml_parser import configure_talking_bass_oscillator
         root = create_empty_project()
         add_instrument_track(root, "TB")
         configure_talking_bass_oscillator(root, 0)
@@ -1308,7 +1308,7 @@ class TestRoutingAndTalkingBass:
         assert elvol.get("amt") == "1"
 
     def test_filter_cut_automation_target(self):
-        from lmms_mcp.xml_parser import resolve_automation_target
+        from mxm_mcp.xml_parser import resolve_automation_target
         root = create_empty_project()
         add_instrument_track(root, "Bass")
         model_id, value = resolve_automation_target(

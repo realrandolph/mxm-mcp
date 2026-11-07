@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from lmms_mcp.composition import (
+from mxm_mcp.composition import (
     add_automation_batch,
     place_phrase,
     place_progression,
     place_rhythm,
 )
-from lmms_mcp.project import LMMSProject
-from lmms_mcp.xml_parser import find_tracks, get_arrangement
+from mxm_mcp.project import LMMSProject
+from mxm_mcp.xml_parser import find_tracks, get_arrangement
 from conftest import (
     PHRASE_A,
     PROGRESSION_I_VI_IV_V,
