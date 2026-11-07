@@ -1829,9 +1829,8 @@ async def _resolve_native_plugin(
     if plugin_type == "vst3":
         records, denied = await _authorized_vst3_plugins(
             ctx, action, arguments, refresh=refresh,
+            plugin_query=plugin,
         )
-        if denied and Path(plugin).suffix.lower() != ".vst3":
-            return None, [], records, denied
         if plugin and (Path(plugin).suffix.lower() == ".vst3" or vst3_mod.is_valid_cid(plugin)):
             exact = [item for item in records if
                      item.get("module") == plugin or item.get("cid", "").casefold() == plugin.casefold()]
@@ -1840,6 +1839,10 @@ async def _resolve_native_plugin(
             if exact:
                 return None, exact, records, denied
         resolved, candidates = vst3_mod.resolve_vst3_instrument(records, plugin_name=plugin)
+        if resolved is not None:
+            return resolved, candidates, records, denied
+        if denied and Path(plugin).suffix.lower() != ".vst3":
+            return None, [], records, denied
         return resolved, candidates, records, denied
     if plugin_type == "lv2":
         records = lv2_mod.discover_lv2(refresh=refresh)["plugins"]
@@ -2411,15 +2414,15 @@ async def add_vst3_instrument_track(
         if error:
             return json.dumps({"error": error})
         discovered, denied = discovered
-        if denied:
-            return json.dumps({
-                "error": "Cannot safely resolve a VST3 name while one or more plugins were denied.",
-                "denied_plugins": denied,
-            })
         descriptor, candidates = vst3_mod.resolve_vst3_instrument(
             discovered, plugin_name=plugin, instruments_only=True
         )
         if descriptor is None:
+            if denied:
+                return json.dumps({
+                    "error": "Cannot safely resolve a VST3 name while one or more plugins were denied.",
+                    "denied_plugins": denied,
+                })
             return json.dumps({
                 "error": f"No installed VST3 instrument matches {plugin!r}."
                 if candidates else "Provide plugin, or module_path and cid.",

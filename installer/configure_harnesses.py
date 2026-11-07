@@ -443,8 +443,14 @@ def configure_harness(
     system: str | None = None,
     env: Mapping[str, str] | None = None,
     home: str | os.PathLike[str] | None = None,
+    detected_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """Configure every known config file for one harness.
+    """Configure configuration files for one harness.
+
+    When ``detected_only`` is True, updates only configuration files that
+    already exist or whose configuration directory exists. If no matching
+    target is found, writes to the primary configuration file for that harness.
+    When ``detected_only`` is False, writes to all known configuration paths.
 
     Returns a list of result records, one per written file.
     """
@@ -452,8 +458,20 @@ def configure_harness(
         raise ValueError(f"Unknown harness: {harness}")
 
     binary = normalize_binary_path(binary_path)
+    all_entries = harness_configs(system=system, env=env, home=home)[harness]
+    if detected_only:
+        entries_to_use = [
+            item for item in all_entries
+            if Path(item["path"]).is_file()
+            or (item.get("detect_dir") and Path(item["detect_dir"]).is_dir())
+        ]
+        if not entries_to_use and all_entries:
+            entries_to_use = [all_entries[0]]
+    else:
+        entries_to_use = all_entries
+
     results: list[dict[str, Any]] = []
-    for item in harness_configs(system=system, env=env, home=home)[harness]:
+    for item in entries_to_use:
         path = Path(item["path"])
         existed = path.is_file()
         if harness == "opencode":
@@ -580,11 +598,16 @@ def _command_configure(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    detected_only = getattr(args, "detected_only", False)
     results: list[dict[str, Any]] = []
     failures = 0
     for harness in selected:
         try:
-            results.extend(configure_harness(harness, binary))
+            results.extend(
+                configure_harness(
+                    harness, binary, detected_only=detected_only
+                )
+            )
         except (ConfigError, OSError, ValueError) as exc:
             failures += 1
             print(f"Could not configure {harness}: {exc}", file=sys.stderr)
@@ -633,6 +656,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--all",
         action="store_true",
         help="configure every supported harness",
+    )
+    configure_parser.add_argument(
+        "--detected-only",
+        action="store_true",
+        help="configure only detected harness configuration paths instead of all variant locations",
     )
     configure_parser.add_argument(
         "--json", action="store_true", help="print a JSON summary"

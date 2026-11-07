@@ -303,6 +303,24 @@ def test_configure_harness_writes_every_known_path(
         assert payload["mcpServers"]["mxm"]["command"] == str(binary)
 
 
+def test_configure_harness_detected_only_targets_only_existing(
+    harness_config: ModuleType, tmp_path: Path
+) -> None:
+    env = linux_env(tmp_path)
+    home = Path(env["HOME"])
+    write_json(home / ".claude.json", {"mcpServers": {}})
+    binary = make_executable(tmp_path / "bin" / "mxm-mcp")
+
+    results = harness_config.configure_harness(
+        "claude", binary, system="Linux", env=env, detected_only=True
+    )
+
+    assert len(results) == 1
+    assert results[0]["path"] == str(home / ".claude.json")
+    desktop_config = home / ".config" / "Claude" / "claude_desktop_config.json"
+    assert not desktop_config.exists()
+
+
 # ---------------------------------------------------------------------------
 # MXM DAW detection
 # ---------------------------------------------------------------------------
@@ -488,6 +506,35 @@ def test_cli_configure_all_harnesses_with_json_output(
         home / ".config" / "Claude" / "claude_desktop_config.json"
     ).is_file()
     assert (home / ".claude.json").is_file()
+
+
+def test_cli_configure_detected_only_limits_written_files(
+    tmp_path: Path,
+) -> None:
+    env = linux_env(tmp_path)
+    binary = make_executable(tmp_path / "bin" / "mxm-mcp")
+    home = Path(env["HOME"])
+    write_json(home / ".config" / "opencode" / "opencode.json", {})
+
+    result = run_cli(
+        [
+            "configure",
+            "--binary",
+            str(binary),
+            "--opencode",
+            "--claude",
+            "--detected-only",
+            "--json",
+        ],
+        env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    configured_paths = [item["path"] for item in payload["configured"]]
+    assert str(home / ".config" / "opencode" / "opencode.json") in configured_paths
+    # Claude was not detected, so only fallback primary is configured, not all variants
+    assert len([p for p in configured_paths if "claude" in p.lower() or "Claude" in p]) == 1
 
 
 def test_cli_configure_without_flags_configures_every_harness(

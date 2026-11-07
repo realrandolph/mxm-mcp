@@ -183,6 +183,42 @@ def test_cached_plugin_descriptor_resolves_nonmatching_bundle_name(tmp_path, mon
     assert probes == []
 
 
+def test_resolve_native_plugin_scopes_to_requested_vst3(tmp_path, monkeypatch):
+    target = tmp_path / "TargetSynth.vst3"
+    target.mkdir()
+    unrelated = tmp_path / "UnrelatedEffect.vst3"
+    unrelated.mkdir()
+
+    identities = {
+        str(bundle): plugin_permissions.PluginIdentity(
+            str(bundle), str(bundle / "module.so"), ("a" if bundle == target else "b") * 64,
+        )
+        for bundle in (target, unrelated)
+    }
+    monkeypatch.setattr(vst3, "standard_vst3_dirs", lambda: [tmp_path])
+    monkeypatch.delenv(vst3.PATH_ONLY_ENV, raising=False)
+    monkeypatch.delenv("VST3_PATH", raising=False)
+    monkeypatch.setattr(vst3, "find_vst3_bundles",
+                        lambda: pytest.fail("scoped resolution must not enumerate all bundles"))
+    monkeypatch.setattr(vst3_probe, "bundle_binary", lambda bundle: Path(bundle) / "module.so")
+    monkeypatch.setattr(plugin_permissions, "identify_plugin",
+                        lambda module, _bin: identities[str(Path(module))])
+    monkeypatch.setattr(plugin_permissions, "cached_probe",
+                        lambda ident: {"classes": []} if ident == identities[str(target)] else None)
+    monkeypatch.setattr(vst3, "discover_vst3_plugins",
+                        lambda **kwargs: [{"module": str(target), "name": "TargetSynth", "cid": "A" * 32, "is_instrument": True}])
+
+    record, candidates, all_records, denied = asyncio.run(
+        server._resolve_native_plugin(
+            "vst3", "TargetSynth", False, FakeContext(capabilities=False), "resolve", {},
+        )
+    )
+
+    assert record is not None
+    assert record["name"] == "TargetSynth"
+    assert denied == []
+
+
 def test_cached_plugin_lookup_does_not_match_vendor_or_parent_folder(tmp_path):
     identity = plugin_permissions.PluginIdentity(
         "/plugins/u-he/Vendor Module.vst3", "/plugins/u-he/Vendor.so", "a" * 64,

@@ -221,7 +221,7 @@ def _find_mxm_binary() -> Path | None:
 
 @pytest.mark.integration
 def test_mxm_native_vst3_renders_audibly(tmp_path):
-    from lmms_mcp import vst3
+    from lmms_mcp import vst3, plugin_permissions, vst3_probe
 
     exe = _find_mxm_binary()
     if exe is None:
@@ -230,6 +230,10 @@ def test_mxm_native_vst3_renders_audibly(tmp_path):
     if not instruments:
         pytest.skip("No native VST3 instrument is installed")
     chosen = next((p for p in instruments if p["name"] == "Surge XT"), instruments[0])
+    binary = vst3_probe.bundle_binary(Path(chosen["module"]))
+    if binary is not None:
+        identity = plugin_permissions.identify_plugin(Path(chosen["module"]), binary)
+        plugin_permissions.remember_decision(identity, "always_allow")
 
     project = LMMSProject()
     project.new(bpm=120)

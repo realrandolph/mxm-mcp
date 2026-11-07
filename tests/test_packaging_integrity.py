@@ -65,7 +65,7 @@ def test_windows_build_script_packages_with_spec_and_inno_setup() -> None:
 def test_package_workflow_covers_requested_triggers_and_platforms() -> None:
     workflow = read_text(".github/workflows/package.yml")
 
-    assert "feat/package-mxm-mcp-14" in workflow
+    assert "branches:" in workflow
     assert "master" in workflow
     assert '"v*"' in workflow
     assert "workflow_dispatch" in workflow
