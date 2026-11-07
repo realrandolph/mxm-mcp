@@ -251,10 +251,15 @@ Built-in effects: `amplifier`, `bassbooster`, `bitcrush`, `compressor`, `crossov
 | `get_mxm_info` | Detect installed MXM DAW version, executable path, and available plugins |
 | `render_project` | Export current project to WAV, FLAC, OGG, or MP3 via headless MXM render |
 
-### Native VST3, LV2 & Plugin Discovery
+### Native VST3, LV2, Plugins & Patch Design
 
 | Tool | Description |
 |------|-------------|
+| `list_instruments` | List installed plugins (VST3, LV2) and built-in generators, excluding quarantined crashes |
+| `list_presets` | List presets, vendor patch trees, and multi-voice banks (.syx#0..31, .fxb, .nksf, .vital...) |
+| `plugin_params` | Introspect VST3 controller parameters with units, display text, and natural string ranges |
+| `save_preset` | Save a sound as a reusable `.vstpreset` file with natural text or numeric parameter overrides |
+| `patch_card` | Headlessly probe and measure a patch's acoustic profile (attack, tail, pitch drift, spectrum) |
 | `list_available_plugins` | Dynamically list all plugins installed in your MXM build |
 | `list_vst3_instruments` | Discover native VST3 plugins for MXM's built-in VST3 host |
 | `add_vst3_instrument_track` | Add a track hosted by MXM's native VST3 host |
