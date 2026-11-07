@@ -6,9 +6,9 @@ import json
 import xml.etree.ElementTree as ET
 import pytest
 
-from lmms_mcp import server
-from lmms_mcp.project import LMMSProject
-from lmms_mcp.composition import (
+from mxm_mcp import server
+from mxm_mcp.project import LMMSProject
+from mxm_mcp.composition import (
     add_automation_batch,
     place_chord,
     place_phrase,

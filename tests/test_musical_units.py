@@ -1,11 +1,11 @@
-"""Tests for lmms_mcp.musical_units pure parsing, validation, and transformations."""
+"""Tests for mxm_mcp.musical_units pure parsing, validation, and transformations."""
 
 from __future__ import annotations
 
 import random
 import pytest
 
-from lmms_mcp.musical_units import (
+from mxm_mcp.musical_units import (
     CHORD_ALIASES,
     CHORD_QUALITIES,
     DRUM_MAP,

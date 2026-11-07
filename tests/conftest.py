@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from lmms_mcp.project import LMMSProject
-from lmms_mcp.xml_parser import find_tracks
+from mxm_mcp.project import LMMSProject
+from mxm_mcp.xml_parser import find_tracks
 
 
 @pytest.fixture

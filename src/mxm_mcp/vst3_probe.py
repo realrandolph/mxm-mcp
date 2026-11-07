@@ -1,7 +1,7 @@
 """Standalone VST3 module introspection for MXM's native VST3 host.
 
 Dependency-free (stdlib + :mod:`ctypes`) and run in a separate process by
-:mod:`lmms_mcp.vst3`: loading third-party binaries in-process is unsafe, so a
+:mod:`mxm_mcp.vst3`: loading third-party binaries in-process is unsafe, so a
 faulty module only kills its own subprocess.
 
 Mirrors the SDK loaders MXM vendors (module_linux/win32/mac) plus
@@ -10,7 +10,7 @@ classes (preferring the UTF-16 ``IPluginFactory3`` info so non-ASCII names
 survive), and report each class id exactly as ``UID::toString()`` formats it -
 the value MXM matches against the project's ``<key>`` on load.
 
-Run as ``python -m lmms_mcp.vst3_probe <bundle> [...]``; prints one JSON object
+Run as ``python -m mxm_mcp.vst3_probe <bundle> [...]``; prints one JSON object
 per bundle: ``{"module": ..., "classes": [...]}`` or ``{"module": ..., "error": ...}``.
 """
 

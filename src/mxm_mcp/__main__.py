@@ -1,4 +1,4 @@
-"""Entry point for running the LMMS MCP server."""
+"""Entry point for running the MXM MCP server."""
 
 from .server import main
 

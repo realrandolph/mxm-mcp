@@ -99,7 +99,7 @@ def create_empty_project(
     master_pitch: int = 0,
 ) -> ET.Element:
     """Create a minimal empty LMMS project element tree."""
-    from .lmms_app import get_mxm_version
+    from .mxm_app import get_mxm_version
 
     creator_version = get_mxm_version() or "1.2.0"
     root = ET.Element("lmms-project", {
@@ -454,7 +454,7 @@ def configure_native_vst3_instrument(
     Writes ``<instrument name="vst3instrument"><vst3instrument>`` with an
     optional base64 ``<state>``/``<models>`` and the ``module``/``cid``
     ``<key>`` MXM matches on load. *module* is the ``.vst3`` bundle path and
-    *cid* its 32-hex class id, as reported by :mod:`lmms_mcp.vst3`.
+    *cid* its 32-hex class id, as reported by :mod:`mxm_mcp.vst3`.
     """
     module, cid = str(module).strip(), cid.strip()
     if not module:
