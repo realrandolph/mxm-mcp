@@ -1833,6 +1833,15 @@ async def list_plugin_presets(
             scoped_plugins = ([record for record in plugins
                                if _record_matches_plugin_query(record, plugin)]
                               if plugin else plugins)
+            if not scoped_plugins and plugin:
+                for bundle in vst3_mod.find_vst3_bundles():
+                    if _plugin_query_matches(bundle.stem, plugin) or _plugin_query_matches(str(bundle), plugin):
+                        scoped_plugins.append({
+                            "name": bundle.stem,
+                            "module": str(bundle),
+                            "is_instrument": True,
+                        })
+                        break
             if scoped_plugins:
                 all_presets.extend(vst3_presets.discover_vst3_presets(
                     scoped_plugins, refresh=refresh,
