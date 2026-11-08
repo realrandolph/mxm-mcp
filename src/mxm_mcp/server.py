@@ -6,6 +6,7 @@ MXM is the digital audio workstation (DAW) these tools drive; project files
 keep the ``lmms-project`` XML format MXM's engine reads.
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -1565,7 +1566,8 @@ async def _authorized_vst3_plugins(
         }]
     approved: dict[str, plugin_permissions.PluginIdentity] = {}
     denied: list[dict] = []
-    can_elicit = _client_supports_plugin_elicitation(ctx)
+    listing_action = action == "list_instruments"
+    can_elicit = _client_supports_plugin_elicitation(ctx) and not listing_action
 
     for bundle in bundles:
         try:
@@ -1598,7 +1600,10 @@ async def _authorized_vst3_plugins(
                     f"SHA-256: {identity.sha256}"
                 )
                 try:
-                    response = await ctx.elicit(message, _PluginPermissionChoice)
+                    response = await asyncio.wait_for(
+                        ctx.elicit(message, _PluginPermissionChoice),
+                        timeout=10.0,
+                    )
                 except Exception as exc:
                     denied.append({"module": identity.module,
                                    "reason": f"permission prompt failed: {type(exc).__name__}"})
@@ -1612,9 +1617,9 @@ async def _authorized_vst3_plugins(
                     "Deny": "deny",
                 }[response.data.decision]
             else:
-                if ctx is None:
+                if ctx is None or listing_action:
                     denied.append({"module": identity.module,
-                                   "reason": "permission context unavailable; plugin not executed"})
+                                   "reason": "unapproved binary; probe not executed"})
                     continue
                 token = plugin_permissions.create_pending(action, arguments, identity)
                 raise plugin_permissions.PendingAccessError(token, identity)
@@ -2561,8 +2566,9 @@ async def list_instruments(
     try:
         call_args = {"search": search, "kind": kind, "refresh": refresh}
         vst3_plugins, denied = await _authorized_vst3_plugins(
-            ctx, "list_instruments", call_args, refresh=refresh,
+            None, "list_instruments", call_args, refresh=refresh,
         )
+        probed_modules = {p.get("module") for p in vst3_plugins if p.get("module")}
         for p in vst3_plugins:
             p_kind = "instrument" if p.get("is_instrument") else "effect"
             if kind == "all" or kind == p_kind:
@@ -2575,6 +2581,19 @@ async def list_instruments(
                     "module": p.get("module"),
                     "sub_categories": p.get("sub_categories", ""),
                 })
+        if kind in {"all", "instrument"}:
+            for bundle in vst3_mod.find_vst3_bundles():
+                bundle_str = str(bundle)
+                if bundle_str not in probed_modules:
+                    entries.append({
+                        "name": bundle.stem,
+                        "id": bundle_str,
+                        "format": "vst3",
+                        "vendor": "Installed VST3",
+                        "kind": "instrument",
+                        "module": bundle_str,
+                        "sub_categories": "",
+                    })
     except plugin_permissions.PendingAccessError as exc:
         return _permission_pending_result(exc)
     except Exception:
