@@ -928,11 +928,12 @@ class TestMxmAppConfiguration:
         assert hasattr(srv, "get_mxm_info")
         assert not hasattr(srv, "get_lmms_info")
 
-    def test_list_available_plugins_reports_mxm_found(self):
+    def test_list_instruments_reports_instruments(self):
+        import asyncio
         from mxm_mcp import server as srv
-        result = json.loads(srv.list_available_plugins())
-        assert "mxm_found" in result
-        assert "lmms_found" not in result
+        result = json.loads(asyncio.run(srv.list_instruments()))
+        assert "instruments" in result
+        assert result["count"] >= 1
 
     def test_projects_dir_env_override(self, monkeypatch, tmp_path):
         from mxm_mcp import server as srv
