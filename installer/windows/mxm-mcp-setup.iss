@@ -1,5 +1,7 @@
 #define ProductName "MXM MCP"
-#define ProductVersion "0.3.0"
+#ifndef ProductVersion
+  #define ProductVersion "0.0.0"
+#endif
 
 [Setup]
 AppId={{A270810A-2E10-4FE8-B57F-148A313B9D7B}

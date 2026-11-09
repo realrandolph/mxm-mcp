@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -91,7 +92,8 @@ def main() -> int:
             str(HARNESS_ENTRY),
         ]
     )
-    run([str(iscc), INSTALLER.name], cwd=INSTALLER.parent)
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    run([str(iscc), f"/DProductVersion={version}", INSTALLER.name], cwd=INSTALLER.parent)
 
     if not OUTPUT.is_file() or OUTPUT.stat().st_size == 0:
         raise SystemExit(f"Inno Setup did not produce the expected package: {OUTPUT}")
