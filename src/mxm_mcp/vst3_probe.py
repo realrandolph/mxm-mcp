@@ -16,22 +16,13 @@ from pathlib import Path
 from . import vst3_platform as plat
 from .path_safety import resolved_path_within
 
-_MAX_CLASSES = 4_096
-_MAX_PARAMETERS = 100_000
-_MAX_UNITS = 4_096
-_MAX_PRESET_BYTES = 64 * 1024 * 1024
-_MAX_STATE_BYTES = 64 * 1024 * 1024
-_MAX_PRESET_CHUNKS = 256
-_STRING128 = 128
-
-_IID_FACTORY2 = plat.iid_bytes("factory2")
-_IID_FACTORY3 = plat.iid_bytes("factory3")
+_MAX_CLASSES, _MAX_PARAMETERS, _MAX_UNITS, _STRING128 = 4_096, 100_000, 4_096, 128
+_MAX_PRESET_BYTES, _MAX_STATE_BYTES, _MAX_PRESET_CHUNKS = 64 * 1024 * 1024, 64 * 1024 * 1024, 256
+_IID_FACTORY2, _IID_FACTORY3 = plat.iid_bytes("factory2"), plat.iid_bytes("factory3")
 
 
 def _iid_words(l1: int, l2: int, l3: int, l4: int) -> bytes:
-    if plat.com_compatible():
-        return struct.pack("<I", l1) + struct.pack("<HH", l2 >> 16, l2 & 0xFFFF) + struct.pack(">II", l3, l4)
-    return struct.pack(">IIII", l1, l2, l3, l4)
+    return struct.pack("<I", l1) + struct.pack("<HH", l2 >> 16, l2 & 0xFFFF) + struct.pack(">II", l3, l4) if plat.com_compatible() else struct.pack(">IIII", l1, l2, l3, l4)
 
 
 _IID_UNKNOWN = _iid_words(0x00000000, 0x00000000, 0xC0000000, 0x00000046)
@@ -43,19 +34,10 @@ _IID_CONNECTION_POINT = _iid_words(0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D8D
 _IID_AUDIO_PROCESSOR = _iid_words(0x42043F99, 0xB7DA453C, 0xA569E79D, 0x9AAEC33D)
 _IID_HOST_APPLICATION = _iid_words(0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5)
 
-_PARAM_CAN_AUTOMATE = 1 << 0
-_PARAM_READONLY = 1 << 1
-_PARAM_LIST = 1 << 3
-_PARAM_HIDDEN = 1 << 4
-_PARAM_PROGRAM_CHANGE = 1 << 15
-_PARAM_BYPASS = 1 << 16
-
-_NO_INTERFACE = ctypes.c_int32(0x80004002).value if plat.WINDOWS else -1
-_RESULT_OK = 0
-_SEEK_SET, _SEEK_CUR, _SEEK_END = 0, 1, 2
-
-_CDLL = ctypes.CDLL
-_FUNCTYPE = ctypes.WINFUNCTYPE if plat.WINDOWS else ctypes.CFUNCTYPE
+_PARAM_CAN_AUTOMATE, _PARAM_READONLY, _PARAM_LIST = 1 << 0, 1 << 1, 1 << 3
+_PARAM_HIDDEN, _PARAM_PROGRAM_CHANGE, _PARAM_BYPASS = 1 << 4, 1 << 15, 1 << 16
+_NO_INTERFACE, _RESULT_OK, _SEEK_SET, _SEEK_CUR, _SEEK_END = ctypes.c_int32(0x80004002).value if plat.WINDOWS else -1, 0, 0, 1, 2
+_CDLL, _FUNCTYPE = ctypes.CDLL, (ctypes.WINFUNCTYPE if plat.WINDOWS else ctypes.CFUNCTYPE)
 
 if plat.WINDOWS:
     try:
@@ -388,7 +370,6 @@ def describe_factory(factory) -> list[dict]:
     get3 = _bind(f3, 8, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p)) if f3 else None
     get2 = _bind(f2, 7, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p)) if f2 else None
     get1 = _bind(factory, 5, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p))
-
     classes: list[dict] = []
     for idx in range(max(0, count)):
         info, wide = _PClassInfoW(), True
@@ -405,7 +386,7 @@ def describe_factory(factory) -> list[dict]:
         classes.append({
             "cid": plat.format_cid(bytes(info.cid)), "name": dec(info.name),
             "category": _decode(info.category), "sub_categories": _decode(info.sub_categories),
-            "vendor": dec(info.vendor), "version": decode(info.version) if False else dec(info.version),
+            "vendor": dec(info.vendor), "version": dec(info.version),
             "class_flags": int(info.class_flags),
         })
     for iface in (f3, f2):
@@ -512,29 +493,28 @@ def _select_class(classes: list[dict], cid: str = "") -> dict | None:
 
 
 def _controller_api(controller) -> dict:
+    h = controller
     return {
-        "set_component_state": _bind(controller, 5, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
-        "set_state": _bind(controller, 6, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
-        "get_state": _bind(controller, 7, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
-        "count": _bind(controller, 8, ctypes.c_int32, (ctypes.c_void_p,)),
-        "info": _bind(controller, 9, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(_PParameterInfo))),
-        "string_by_value": _bind(controller, 10, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double, ctypes.POINTER(ctypes.c_uint16))),
-        "value_by_string": _bind(controller, 11, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_double))),
-        "to_plain": _bind(controller, 12, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
-        "to_normalized": _bind(controller, 13, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
-        "normalized": _bind(controller, 14, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32)),
-        "set_normalized": _bind(controller, 15, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
+        "set_component_state": _bind(h, 5, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
+        "set_state": _bind(h, 6, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
+        "get_state": _bind(h, 7, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_void_p)),
+        "count": _bind(h, 8, ctypes.c_int32, (ctypes.c_void_p,)),
+        "info": _bind(h, 9, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(_PParameterInfo))),
+        "string_by_value": _bind(h, 10, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double, ctypes.POINTER(ctypes.c_uint16))),
+        "value_by_string": _bind(h, 11, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_double))),
+        "to_plain": _bind(h, 12, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
+        "to_normalized": _bind(h, 13, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
+        "normalized": _bind(h, 14, ctypes.c_double, (ctypes.c_void_p, ctypes.c_uint32)),
+        "set_normalized": _bind(h, 15, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_double)),
     }
 
 
 def _unit_paths(controller) -> dict[int, str]:
     u_info = _query_interface(controller, _IID_UNIT_INFO)
-    if not u_info:
-        return {}
+    if not u_info: return {}
     try:
         cnt = int(_bind(u_info, 3, ctypes.c_int32, (ctypes.c_void_p,))(_address(u_info)))
-        if cnt <= 0 or cnt > _MAX_UNITS:
-            return {}
+        if cnt <= 0 or cnt > _MAX_UNITS: return {}
         get_i = _bind(u_info, 4, ctypes.c_int32, (ctypes.c_void_p, ctypes.c_int32, ctypes.POINTER(_PUnitInfo)))
         entries: dict[int, tuple[str, int]] = {}
         for idx in range(cnt):
@@ -546,15 +526,12 @@ def _unit_paths(controller) -> dict[int, str]:
             parts, cur = [], uid
             for _ in range(len(entries) + 1):
                 name, parent = entries.get(cur, ("", -1))
-                if name and cur != 0:
-                    parts.append(name)
-                if parent in (-1, cur) or parent not in entries:
-                    break
+                if name and cur != 0: parts.append(name)
+                if parent in (-1, cur) or parent not in entries: break
                 cur = parent
             paths[uid] = "/".join(reversed(parts))
         return paths
-    finally:
-        _release(u_info)
+    finally: _release(u_info)
 
 
 def _string_for_value(api: dict, handle, param_id: int, value: float) -> str:
