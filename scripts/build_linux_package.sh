@@ -48,6 +48,12 @@ rm -rf "${PYINSTALLER_DIST}" "${PYINSTALLER_WORK}" "${PYINSTALLER_SPEC}" "${STAG
 cat >"${ENTRY_SCRIPT}" <<'PY'
 """PyInstaller entry point for the MXM MCP server."""
 
+import sys
+
+if len(sys.argv) > 2 and sys.argv[1] == "-m" and "vst3_probe" in sys.argv[2]:
+    from mxm_mcp.vst3_probe import main as probe_main
+    sys.exit(probe_main(sys.argv[3:]))
+
 from mxm_mcp.server import main
 
 if __name__ == "__main__":
