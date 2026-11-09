@@ -517,15 +517,9 @@ def discover_vst3_presets(
         catalog_roots = _catalog_roots(plugins)
         for path in _collect_files(paths):
             suffix = path.suffix.lower()
-            if suffix == ".vstpreset":
-                parsed = parse_vstpreset(path)
-                record = _associate_preset(parsed, plugins, path)
-                presets.append(record)
-                continue
-            if suffix in _UHE_EXTENSIONS:
-                parsed = parse_h2p(path)
-                record = _associate_preset(parsed, plugins, path)
-                presets.append(record)
+            if suffix == ".vstpreset" or suffix in _UHE_EXTENSIONS:
+                parsed = parse_vstpreset(path) if suffix == ".vstpreset" else parse_h2p(path)
+                presets.append(_associate_preset(parsed, plugins, path))
                 continue
             owner = _owning_plugin(path, catalog_roots, plugins)
             if suffix in _BANK_EXTENSIONS and owner is not None:
@@ -583,9 +577,7 @@ def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str |
         return parsed.get("state")
     if suffix in _UHE_EXTENSIONS:
         parsed = parse_h2p(safe_path, include_state=True)
-        if not parsed.get("loadable"):
-            return None
-        return parsed.get("state")
+        return parsed.get("state") if parsed.get("loadable") else None
     if suffix not in _CATALOG_EXTENSIONS:
         return None
     program = preset.get("program_index")
@@ -594,17 +586,11 @@ def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str |
     if isinstance(program, int) and program < 0:
         program = None
     try:
-        decoded = preset_formats.decode_preset(
-            safe_path,
-            format=str(preset.get("format") or ""),
-            selector=program,
-        )
+        decoded = preset_formats.decode_preset(safe_path, format=str(preset.get("format") or ""), selector=program)
     except (OSError, preset_formats.PresetFormatError):
         return None
     state = decoded.state
-    if not state or len(state) > _MAX_COMPONENT_BYTES:
-        return None
-    return base64.b64encode(state).decode("ascii")
+    return base64.b64encode(state).decode("ascii") if state and len(state) <= _MAX_COMPONENT_BYTES else None
 
 
 def preset_matches_plugin(preset: dict, *, module: str = "", cid: str = "") -> bool:
