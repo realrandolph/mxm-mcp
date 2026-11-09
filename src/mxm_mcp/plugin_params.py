@@ -1,61 +1,36 @@
 """VST3 parameter introspection, natural-text parsing, and preset export."""
 
-from __future__ import annotations
-
-import base64
-import binascii
-import json
-import math
-import os
-import re
-import sys
-import tempfile
+import base64, binascii, json, math, os, re, sys, tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 from . import plugin_permissions, vst3
 
-__all__ = [
-    "PluginParameterError", "resolve_plugin_bundle", "run_probe", "decode_state",
-    "full_parameter_name", "project_parameter", "parameter_matches", "find_parameter",
-    "parse_natural_value", "plain_to_normalized", "text_to_normalized",
-    "get_plugin_parameters", "save_plugin_preset_file",
-]
+__all__ = ["PluginParameterError", "resolve_plugin_bundle", "run_probe", "decode_state", "full_parameter_name",
+           "project_parameter", "parameter_matches", "find_parameter", "parse_natural_value",
+           "plain_to_normalized", "text_to_normalized", "get_plugin_parameters", "save_plugin_preset_file"]
 
-_PROBE_TIMEOUT = 15.0
-_PROBE_OUTPUT_LIMIT = 4 * 1024 * 1024
-_MAX_PARAMETER_TEXT = 256
-_MAX_RESOLUTION_ENTRIES = 512
-
-_PARAMETER_FIELDS = (
-    "id", "name", "module", "min", "max", "default", "current", "normalized",
-    "display", "units", "stepped", "readonly", "hidden",
-)
-_PARAMETER_DETAIL_FIELDS = (
-    "short_name", "default_normalized", "step_count", "unit_id",
-    "can_automate", "is_list", "is_program_change", "is_bypass",
-)
-
+_PROBE_TIMEOUT, _PROBE_OUTPUT_LIMIT = 15.0, 4 * 1024 * 1024
+_MAX_PARAMETER_TEXT, _MAX_RESOLUTION_ENTRIES = 256, 512
+_PARAMETER_FIELDS = "id name module min max default current normalized display units stepped readonly hidden".split()
+_PARAMETER_DETAIL_FIELDS = "short_name default_normalized step_count unit_id can_automate is_list is_program_change is_bypass".split()
 _NUMBER = re.compile(r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*([A-Za-z%°µμ]*)\s*$")
 _FREQUENCY_UNITS = {"hz", "khz", "mhz"}
 _SECOND_UNITS = {"s", "sec", "secs", "second", "seconds"}
 _SEMITONE_UNITS = {"st", "semitones", "semitone", "halfsteps", "halfstep"}
 
 
-class PluginParameterError(RuntimeError):
-    pass
+class PluginParameterError(RuntimeError): pass
 
 
 def _fold(text: str) -> str:
-    return "".join(char for char in str(text).casefold() if char.isalnum())
+    return "".join(c for c in str(text).casefold() if c.isalnum())
 
 
 def _bundle_entries(root: Path) -> list[Path]:
     if root.suffix.lower() == ".vst3": return [root] if root.exists() else []
-    try:
-        return [e for idx, e in enumerate(root.iterdir()) if idx < _MAX_RESOLUTION_ENTRIES and e.suffix.lower() == ".vst3"] if root.is_dir() else []
-    except (OSError, RuntimeError):
-        return []
+    try: return [e for e in list(root.iterdir())[:_MAX_RESOLUTION_ENTRIES] if e.suffix.lower() == ".vst3"] if root.is_dir() else []
+    except (OSError, RuntimeError): return []
 
 
 def resolve_plugin_bundle(plugin: str) -> Path:
@@ -64,17 +39,14 @@ def resolve_plugin_bundle(plugin: str) -> Path:
     direct = Path(query).expanduser()
     if direct.suffix.lower() == ".vst3" and direct.exists(): return direct.resolve()
     norm = _fold(direct.stem if direct.suffix.lower() == ".vst3" else direct.name)
-    exact: dict[str, Path] = {}
-    partial: dict[str, Path] = {}
+    exact, partial = {}, {}
     if norm:
-        for r in vst3.effective_search_paths():
-            for e in _bundle_entries(Path(r).expanduser()):
-                k = _fold(e.stem)
-                if k == norm: exact.setdefault(str(e), e)
-                elif norm in k: partial.setdefault(str(e), e)
+        for e in (e for r in vst3.effective_search_paths() for e in _bundle_entries(Path(r).expanduser())):
+            k = _fold(e.stem)
+            if k == norm: exact.setdefault(str(e), e)
+            elif norm in k: partial.setdefault(str(e), e)
     if not exact:
-        for mod in plugin_permissions.cached_probe_modules(query):
-            cand = Path(mod)
+        for cand in map(Path, plugin_permissions.cached_probe_modules(query)):
             (exact if _fold(cand.stem) == norm else partial).setdefault(str(cand), cand)
     matches = exact or partial
     if len(matches) == 1: return Path(next(iter(matches.values()))).resolve()
@@ -86,20 +58,15 @@ def resolve_plugin_bundle(plugin: str) -> Path:
 def run_probe(arguments: list[str], *, timeout: float | None = None) -> dict:
     cmd = [sys.executable, "-m", "mxm_mcp.vst3_probe", *arguments]
     try:
-        stdout, stderr, status, timed_out, exceeded = vst3._run_capped_probe(
-            cmd, _PROBE_OUTPUT_LIMIT, _PROBE_TIMEOUT if timeout is None else timeout)
-    except OSError as exc:
-        raise PluginParameterError(f"could not start the VST3 probe: {exc}") from exc
+        stdout, stderr, status, timed_out, exceeded = vst3._run_capped_probe(cmd, _PROBE_OUTPUT_LIMIT, _PROBE_TIMEOUT if timeout is None else timeout)
+    except OSError as exc: raise PluginParameterError(f"could not start the VST3 probe: {exc}") from exc
     if timed_out: raise PluginParameterError("the VST3 probe timed out")
     if exceeded: raise PluginParameterError("the VST3 probe produced too much output")
     txt = stdout.decode("utf-8", "replace")
     for line in reversed(txt.splitlines()):
-        line = line.strip()
-        if line:
-            try:
-                p = json.loads(line)
-                if isinstance(p, dict): return p
-            except json.JSONDecodeError: pass
+        try: p = json.loads(line.strip())
+        except json.JSONDecodeError: continue
+        if isinstance(p, dict): return p
     detail = (stderr.decode("utf-8", "replace") or txt).strip()
     raise PluginParameterError(detail or f"the VST3 probe exited with status {status}")
 
@@ -107,7 +74,7 @@ def run_probe(arguments: list[str], *, timeout: float | None = None) -> dict:
 def decode_state(base_state) -> bytes:
     if isinstance(base_state, (bytes, bytearray)): return bytes(base_state)
     text = str(base_state or "").strip()
-    if text.startswith("base64:"): text = text[len("base64:"):].strip()
+    if text.startswith("base64:"): text = text[7:].strip()
     if not text: return b""
     try: return base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError) as exc: raise PluginParameterError("base_state is not valid base64") from exc
@@ -116,9 +83,7 @@ def decode_state(base_state) -> bytes:
 @contextmanager
 def _state_file(base_state):
     data = decode_state(base_state)
-    if not data:
-        yield None
-        return
+    if not data: yield None; return
     fd, path = tempfile.mkstemp(prefix="mxm-plugin-state-", suffix=".bin")
     try:
         with os.fdopen(fd, "wb") as s: s.write(data)
@@ -129,60 +94,49 @@ def _state_file(base_state):
 
 
 def _invoke(arguments: list[str], probe) -> dict:
-    runner = probe or run_probe
-    p = runner(list(arguments))
+    p = (probe or run_probe)(list(arguments))
     if not isinstance(p, dict): raise PluginParameterError("the VST3 probe returned no result")
     return p
 
 
 def full_parameter_name(param: dict) -> str:
-    m = str(param.get("module") or "").strip("/ ")
-    n = str(param.get("name") or "")
+    m, n = str(param.get("module") or "").strip("/ "), str(param.get("name") or "")
     return f"{m}/{n}" if m else n
 
 
 def project_parameter(param: dict, details: bool = False) -> dict:
-    rec = {k: param[k] for k in _PARAMETER_FIELDS if k in param}
+    rec = {k: param[k] for k in (_PARAMETER_FIELDS + _PARAMETER_DETAIL_FIELDS if details else _PARAMETER_FIELDS) if k in param}
     if "id" in rec:
         try: rec["id"] = int(rec["id"])
         except (TypeError, ValueError): pass
-    if details: rec.update({k: param[k] for k in _PARAMETER_DETAIL_FIELDS if k in param})
     return rec
 
 
 def parameter_matches(param: dict, search: str) -> bool:
-    tokens = [t for t in str(search or "").split() if t]
-    if not tokens: return True
-    n, m, p = str(param.get("name") or "").casefold(), str(param.get("module") or "").casefold(), full_parameter_name(param).casefold()
-    for tok in tokens:
+    n, m = str(param.get("name") or "").casefold(), str(param.get("module") or "").casefold()
+    full = full_parameter_name(param).casefold()
+    for tok in str(search or "").split():
         if tok.startswith("#"):
             try:
                 if int(tok[1:], 0) != int(param.get("id", -1)): return False
             except (TypeError, ValueError): return False
             continue
         low = tok.casefold()
-        if "/" in low:
-            mt, _, nt = low.partition("/")
-            if mt in m and nt in n: continue
-        if low not in n and low not in p: return False
+        if "/" in low and all(a in b for a, b in zip(low.split("/", 1), (m, n))): continue
+        if low not in n and low not in full: return False
     return True
 
 
 def find_parameter(parameters: list[dict], key: str) -> dict | None:
     text = str(key or "").strip()
     if not text: return None
-    if text.startswith("#"):
-        stem = text[1:].strip()
-        if stem:
-            try:
-                wanted = int(stem, 0)
-                return next((i for i in parameters if int(i.get("id", -1)) == wanted), None)
-            except ValueError: pass
+    if text.startswith("#") and (stem := text[1:].strip()):
+        try: return next((i for i in parameters if int(i.get("id", -1)) == int(stem, 0)), None)
+        except ValueError: pass
     matches = [i for i in parameters if parameter_matches(i, text)]
-    if not matches and text.isdigit():
-        return next((i for i in parameters if int(i.get("id", -1)) == int(text)), None)
+    if not matches and text.isdigit(): return next((i for i in parameters if int(i.get("id", -1)) == int(text)), None)
     if len(matches) == 1: return matches[0]
-    exact = [i for i in matches if str(i.get("name") or "").casefold() == text.casefold() or full_parameter_name(i).casefold() == text.casefold()]
+    exact = [i for i in matches if text.casefold() in (str(i.get("name") or "").casefold(), full_parameter_name(i).casefold())]
     if len(exact) == 1: return exact[0]
     if not matches: return None
     raise PluginParameterError(f"{key!r} matches {len(matches)} parameters; use Module/Name or #id")
@@ -202,8 +156,7 @@ def _unit_scale(unit: str, parameter_units: str) -> float:
 def parse_natural_value(text: str, param: dict) -> float | None:
     m = _NUMBER.match(str(text or "")[:_MAX_PARAMETER_TEXT])
     if not m: return None
-    num = float(m.group(1))
-    if not math.isfinite(num): return None
+    if not math.isfinite(num := float(m.group(1))): return None
     plain = num * _unit_scale(m.group(2) or "", str(param.get("units") or ""))
     try:
         low, high = float(param.get("min")), float(param.get("max"))
@@ -215,8 +168,8 @@ def parse_natural_value(text: str, param: dict) -> float | None:
 def plain_to_normalized(plain: float, param: dict) -> float:
     low, high = float(param.get("min", 0.0) or 0.0), float(param.get("max", 1.0) or 1.0)
     if not high > low: return 0.0
-    is_freq = str(param.get("units") or "").strip().casefold() in _FREQUENCY_UNITS
-    if is_freq and low > 0 and plain > 0: return min(1.0, max(0.0, math.log(plain / low) / math.log(high / low)))
+    if str(param.get("units") or "").strip().casefold() in _FREQUENCY_UNITS and low > 0 and plain > 0:
+        return min(1.0, max(0.0, math.log(plain / low) / math.log(high / low)))
     return min(1.0, max(0.0, (plain - low) / (high - low)))
 
 
@@ -226,13 +179,9 @@ def text_to_normalized(text: str, param: dict) -> float | None:
 
 
 def get_plugin_parameters(plugin: str, preset: str = "", search: str = "", details: bool = False, *, cid: str = "", probe=None) -> dict:
-    bundle = resolve_plugin_bundle(plugin)
-    p_path = Path(preset).expanduser() if preset else None
-    args = ["--params", str(bundle)]
-    if p_path:
-        if not p_path.exists(): raise PluginParameterError(f"preset not found: {p_path}")
-        args += ["--preset", str(p_path)]
-    if cid: args += ["--cid", cid]
+    bundle, p_path = resolve_plugin_bundle(plugin), Path(preset).expanduser() if preset else None
+    if p_path and not p_path.exists(): raise PluginParameterError(f"preset not found: {p_path}")
+    args = ["--params", str(bundle)] + (["--preset", str(p_path)] if p_path else []) + (["--cid", cid] if cid else [])
     payload = _invoke(args, probe)
     if payload.get("error"): raise PluginParameterError(f"could not inspect {plugin!r}: {payload.get('error')}")
     params = [project_parameter(i, details) for i in payload.get("parameters") or [] if isinstance(i, dict)]
@@ -250,7 +199,7 @@ def _override_arguments(params: dict, parameters: list[dict]) -> tuple[list[str]
         rec = find_parameter(parameters, k)
         if rec is None: raise PluginParameterError(f"no parameter matches {k!r}")
         pid = int(rec["id"])
-        if isinstance(v, bool) or isinstance(v, (int, float)):
+        if isinstance(v, (int, float)):
             val = float(v)
             if not math.isfinite(val) or not 0.0 <= val <= 1.0:
                 raise PluginParameterError(f"{k!r}: numeric values are normalized 0..1; pass text such as '1.2 kHz' for plain values")
@@ -292,9 +241,8 @@ def save_plugin_preset_file(plugin: str, out_path: str, base_preset: str = "", b
 
     applied = int(payload.get("parameters_applied", 0))
     warnings = list(payload.get("warnings") or [])
-    for it in payload.get("parameter_results") or []:
-        if isinstance(it, dict) and it.get("source") == "fallback":
-            warnings.append(f"parameter #{it.get('id')} used the local text parser for {it.get('text')!r}")
+    warnings += [f"parameter #{it.get('id')} used the local text parser for {it.get('text')!r}"
+                 for it in payload.get("parameter_results") or [] if isinstance(it, dict) and it.get("source") == "fallback"]
     if applied < len(requested): warnings.append(f"{len(requested) - applied} override(s) were not applied")
     applied_vals = {int(i["id"]): float(i["normalized"]) for i in payload.get("applied") or [] if isinstance(i, dict) and "id" in i and "normalized" in i}
     unverified: list[int] = []
@@ -307,7 +255,6 @@ def save_plugin_preset_file(plugin: str, out_path: str, base_preset: str = "", b
             saved = {int(i["id"]): i.get("normalized") for i in chk.get("parameters") or [] if isinstance(i, dict) and "id" in i}
             unverified = [pid for pid, want in applied_vals.items() if saved.get(pid) is None or abs(float(saved[pid]) - want) > 1e-3]
             if unverified: warnings.append("the saved preset does not reload every override; this plugin may keep parameter values outside its component state")
-
     res = {"path": str(dest), "bytes": size, "plugin": plugin, "parameters_applied": applied, "verified": not unverified}
     if unverified: res["unverified_parameters"] = unverified
     if payload.get("class"): res["class"] = payload["class"]
