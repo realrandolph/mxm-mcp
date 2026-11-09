@@ -382,10 +382,9 @@ def _catalog_roots(plugins: list[dict]) -> list[tuple[str, dict]]:
         grouped.setdefault(Path(os.path.normpath(os.path.abspath(str(directory)))), plugin)
     for directory, plugin in grouped.items():
         try:
-            resolved = directory.resolve(strict=True)
+            roots.append((str(directory.resolve(strict=True)), plugin))
         except (OSError, RuntimeError):
-            continue
-        roots.append((str(resolved), plugin))
+            pass
     return roots
 
 
@@ -394,126 +393,65 @@ def _owning_plugin(path: Path, roots: list[tuple[str, dict]], plugins: list[dict
         resolved = str(path.resolve(strict=True))
     except (OSError, RuntimeError):
         resolved = str(path)
-    owner = None
-    best = -1
+    owner, best = None, -1
     for root, plugin in roots:
         try:
             Path(resolved).relative_to(root)
         except ValueError:
             continue
         if len(root) > best:
-            best = len(root)
-            owner = plugin
+            best, owner = len(root), plugin
     if owner is None and plugins:
-        format_name = preset_formats.detect_format(path)
-        for plugin in plugins:
-            if preset_catalog.preset_belongs_to(plugin, path, format_name):
-                return plugin
+        fmt = preset_formats.detect_format(path)
+        return next((p for p in plugins if preset_catalog.preset_belongs_to(p, path, fmt)), None)
     return owner
 
 
 def _nks_owner(parsed: preset_formats.DecodedPreset, plugins: list[dict]) -> dict | None:
     """Associate an NKS file by VST3 uid, VST2 magic, or bank name."""
-    uid = parsed.uid.upper()
-    magic = parsed.magic.upper()
-    bank = preset_catalog.squash(parsed.bank)
-    for plugin in plugins:
-        cid = str(plugin.get("cid", "")).upper()
-        if uid and cid == uid:
-            return plugin
-        if magic and (magic in cid):
-            return plugin
-        name = preset_catalog.squash(str(plugin.get("name", "")))
-        if bank and name and bank == name:
-            return plugin
+    uid, magic, bank = parsed.uid.upper(), parsed.magic.upper(), preset_catalog.squash(parsed.bank)
+    for p in plugins:
+        cid = str(p.get("cid", "")).upper()
+        if (uid and cid == uid) or (magic and magic in cid) or (bank and bank == preset_catalog.squash(str(p.get("name", "")))):
+            return p
     return None
 
 
 def _catalog_loadable(format_name: str, path: Path) -> bool:
-    if format_name in _ALWAYS_LOADABLE_FORMATS:
-        if format_name == "cherry" and path.suffix.lower() == ".voltagepreset":
-            return False
-        return True
-    return False
+    return format_name in _ALWAYS_LOADABLE_FORMATS and not (format_name == "cherry" and path.suffix.lower() == ".voltagepreset")
 
 
 def _catalog_preset_record(
-    parsed: preset_formats.DecodedPreset,
-    plugin: dict,
-    path: Path,
-    *,
-    selector: int | None = None,
-    program_name: str = "",
+    parsed: preset_formats.DecodedPreset, plugin: dict, path: Path, *, selector: int | None = None, program_name: str = "",
 ) -> dict:
     source = str(path) + (f"#{selector}" if selector is not None else "")
-    metadata: dict[str, str] = {}
-    if parsed.vendor:
-        metadata["vendor"] = parsed.vendor
-    if parsed.bank:
-        metadata["bank"] = parsed.bank
-    if parsed.category:
-        metadata["category"] = parsed.category
-    name = program_name or parsed.program_name or parsed.name or path.stem
+    meta = {k: v for k, v in [("vendor", parsed.vendor), ("bank", parsed.bank), ("category", parsed.category)] if v}
     return {
-        "id": source,
-        "name": name,
-        "bank": parsed.bank or path.stem,
-        "category": parsed.category or path.parent.name or None,
-        "author": parsed.vendor or None,
-        "tags": [],
-        "character": None,
-        "origin": _origin(path),
-        "source": source,
-        "format": parsed.format,
-        "plugin_uri": None,
-        "plugin_name": plugin.get("name"),
-        "plugin_is_instrument": bool(plugin.get("is_instrument")),
-        "plugin_module": plugin.get("module"),
-        "plugin_cid": plugin.get("cid"),
+        "id": source, "name": program_name or parsed.program_name or parsed.name or path.stem,
+        "bank": parsed.bank or path.stem, "category": parsed.category or path.parent.name or None,
+        "author": parsed.vendor or None, "tags": [], "character": None, "origin": _origin(path),
+        "source": source, "format": parsed.format, "plugin_uri": None,
+        "plugin_name": plugin.get("name"), "plugin_is_instrument": bool(plugin.get("is_instrument")),
+        "plugin_module": plugin.get("module"), "plugin_cid": plugin.get("cid"),
         "loadable": _catalog_loadable(parsed.format, path),
-        "state_chunks": [parsed.format],
-        "requires_controller_state": False,
-        "unsupported_state_chunks": [],
-        "metadata": metadata,
+        "state_chunks": [parsed.format], "requires_controller_state": False,
+        "unsupported_state_chunks": [], "metadata": meta,
         **({"program_index": selector} if selector is not None else {}),
     }
 
 
-def _catalog_bank_records(
-    path: Path,
-    plugin: dict,
-    format_name: str,
-) -> list[dict]:
+def _catalog_bank_records(path: Path, plugin: dict, format_name: str) -> list[dict]:
     try:
         programs = preset_catalog.bank_programs(path)
     except (OSError, preset_formats.PresetFormatError):
         return []
-    records = []
-    for program in programs:
-        records.append({
-            "id": f"{path}#{program.index}",
-            "name": program.name or f"{path.stem} #{program.index}",
-            "bank": path.stem,
-            "category": path.stem,
-            "author": None,
-            "tags": [],
-            "character": None,
-            "origin": _origin(path),
-            "source": f"{path}#{program.index}",
-            "format": format_name,
-            "plugin_uri": None,
-            "plugin_name": plugin.get("name"),
-            "plugin_is_instrument": bool(plugin.get("is_instrument")),
-            "plugin_module": plugin.get("module"),
-            "plugin_cid": plugin.get("cid"),
-            "loadable": _catalog_loadable(format_name, path),
-            "state_chunks": [format_name],
-            "requires_controller_state": False,
-            "unsupported_state_chunks": [],
-            "metadata": {"bank": path.stem},
-            "program_index": program.index,
-        })
-    return records
+    return [
+        _catalog_preset_record(
+            preset_formats.DecodedPreset(format=format_name, bank=path.stem, category=path.stem),
+            plugin, path, selector=p.index, program_name=p.name or f"{path.stem} #{p.index}",
+        )
+        for p in programs
+    ]
 
 
 def _associate_preset(preset: dict, plugins: list[dict], path: Path) -> dict:

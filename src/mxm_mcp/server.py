@@ -1893,6 +1893,20 @@ async def list_plugin_presets(
                         "presets": public_records}, indent=2)
 
 
+def _find_preset_match(indexed: list[dict], preset: str, req_source: str, filter_fn=None) -> dict | None:
+    cands = [i for i in indexed if filter_fn is None or filter_fn(i)]
+    sel = next((i for i in cands if i.get("id") == preset or i.get("source") == req_source), None)
+    if sel is not None: return sel
+    low = preset.strip().casefold()
+    for match in (
+        [i for i in cands if str(i.get("name", "")).casefold() == low],
+        [i for i in cands if f"{str(i.get('category', '')).casefold()}/{str(i.get('name', '')).casefold()}" == low],
+        [i for i in cands if low in str(i.get("name", "")).casefold()],
+    ):
+        if len(match) == 1: return match[0]
+    return None
+
+
 @mcp.tool()
 async def load_native_plugin_preset(
     track_index: int,
@@ -1935,22 +1949,7 @@ async def load_native_plugin_preset(
             indexed = vst3_index["presets"]
             requested = Path(preset).expanduser()
             requested_source = str(requested.resolve()) if requested.exists() else preset
-            selected = next((item for item in indexed
-                             if item.get("id") == preset or item.get("source") == requested_source), None)
-            if selected is None:
-                lowered = preset.strip().casefold()
-                exact_name = [item for item in indexed if str(item.get("name", "")).casefold() == lowered]
-                if len(exact_name) == 1:
-                    selected = exact_name[0]
-                elif not exact_name:
-                    cat_name = [item for item in indexed
-                                if f"{str(item.get('category', '')).casefold()}/{str(item.get('name', '')).casefold()}" == lowered]
-                    if len(cat_name) == 1:
-                        selected = cat_name[0]
-                    else:
-                        partial = [item for item in indexed if lowered in str(item.get("name", "")).casefold()]
-                        if len(partial) == 1:
-                            selected = partial[0]
+            selected = _find_preset_match(indexed, preset, requested_source)
             if selected is None or not vst3_presets.preset_matches_plugin(
                     selected, module=module, cid=cid):
                 raise ValueError("Preset is not indexed for this VST3 plugin")
@@ -1976,19 +1975,7 @@ async def load_native_plugin_preset(
             index = lv2_mod.discover_lv2()
             requested_path = Path(preset).expanduser()
             requested_source = str(requested_path.resolve()) if requested_path.exists() else preset
-            selected = next((item for item in index["presets"]
-                             if item.get("id") == preset or item.get("source") == requested_source), None)
-            if selected is None:
-                lowered = preset.strip().casefold()
-                exact_name = [item for item in index["presets"]
-                              if item.get("plugin_uri") == uri and str(item.get("name", "")).casefold() == lowered]
-                if len(exact_name) == 1:
-                    selected = exact_name[0]
-                elif not exact_name:
-                    partial = [item for item in index["presets"]
-                               if item.get("plugin_uri") == uri and lowered in str(item.get("name", "")).casefold()]
-                    if len(partial) == 1:
-                        selected = partial[0]
+            selected = _find_preset_match(index["presets"], preset, requested_source, filter_fn=lambda i: i.get("plugin_uri") == uri)
             if selected is None or selected.get("plugin_uri") != uri:
                 raise ValueError("Preset is not indexed for this LV2 plugin")
             if not selected.get("loadable"):
@@ -2368,110 +2355,56 @@ async def list_instruments(
         limit_val = 100
 
     entries: list[dict] = []
-
-    # 1. Built-in MXM generators / instruments
-    builtins = [
-        {"name": "builtin:tripleoscillator", "id": "tripleoscillator", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "3-oscillator subtractive synth with FM and sync"},
-        {"name": "builtin:lb302", "id": "lb302", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "Monophonic 303-style bass synthesizer"},
-        {"name": "builtin:kicker", "id": "kicker", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "Drum synthesizer for kicks and percussion"},
-        {"name": "builtin:organic", "id": "organic", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "Additive organ and pad synthesizer"},
-        {"name": "builtin:bitinvader", "id": "bitinvader", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "Wavetable and chiptune synth"},
-        {"name": "builtin:monstro", "id": "monstro", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "3-oscillator synth with matrix modulation"},
-        {"name": "builtin:watsyn", "id": "watsyn", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "4-oscillator wavetable synthesizer"},
-        {"name": "builtin:audiofileprocessor", "id": "audiofileprocessor", "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": "One-shot and sample player"},
-    ]
     if kind in {"all", "instrument"}:
-        entries.extend(builtins)
+        entries.extend({
+            "name": f"builtin:{k}", "id": k, "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": d,
+        } for k, d in [
+            ("tripleoscillator", "3-oscillator subtractive synth with FM and sync"),
+            ("lb302", "Monophonic 303-style bass synthesizer"),
+            ("kicker", "Drum synthesizer for kicks and percussion"),
+            ("organic", "Additive organ and pad synthesizer"),
+            ("bitinvader", "Wavetable and chiptune synth"),
+            ("monstro", "3-oscillator synth with matrix modulation"),
+            ("watsyn", "4-oscillator wavetable synthesizer"),
+            ("audiofileprocessor", "One-shot and sample player"),
+        ])
 
-    # 2. VST3 plugins
     try:
-        call_args = {"search": search, "kind": kind, "refresh": refresh}
-        vst3_plugins, denied = await _authorized_vst3_plugins(
-            None, "list_instruments", call_args, refresh=refresh,
-        )
+        vst3_plugins, _ = await _authorized_vst3_plugins(None, "list_instruments", {"search": search, "kind": kind, "refresh": refresh}, refresh=refresh)
         probed_modules = {p.get("module") for p in vst3_plugins if p.get("module")}
         for p in vst3_plugins:
             p_kind = "instrument" if p.get("is_instrument") else "effect"
-            if kind == "all" or kind == p_kind:
-                entries.append({
-                    "name": p.get("name"),
-                    "id": p.get("cid"),
-                    "format": "vst3",
-                    "vendor": p.get("vendor", ""),
-                    "kind": p_kind,
-                    "module": p.get("module"),
-                    "sub_categories": p.get("sub_categories", ""),
-                })
+            if kind in ("all", p_kind):
+                entries.append({"name": p.get("name"), "id": p.get("cid"), "format": "vst3", "vendor": p.get("vendor", ""), "kind": p_kind, "module": p.get("module"), "sub_categories": p.get("sub_categories", "")})
         if kind in {"all", "instrument"}:
-            for bundle in vst3_mod.find_vst3_bundles():
-                bundle_str = str(bundle)
-                if bundle_str not in probed_modules:
-                    entries.append({
-                        "name": bundle.stem,
-                        "id": bundle_str,
-                        "format": "vst3",
-                        "vendor": "Installed VST3",
-                        "kind": "instrument",
-                        "module": bundle_str,
-                        "sub_categories": "",
-                    })
+            for b in vst3_mod.find_vst3_bundles():
+                if str(b) not in probed_modules:
+                    entries.append({"name": b.stem, "id": str(b), "format": "vst3", "vendor": "Installed VST3", "kind": "instrument", "module": str(b), "sub_categories": ""})
     except plugin_permissions.PendingAccessError as exc:
         return _permission_pending_result(exc)
     except Exception:
         pass
 
-    # 3. LV2 plugins
     try:
-        lv2_index = lv2_mod.discover_lv2(refresh=refresh)
-        for p in lv2_index.get("plugins", []):
+        for p in lv2_mod.discover_lv2(refresh=refresh).get("plugins", []):
             p_kind = "instrument" if p.get("is_instrument") else "effect"
-            if kind == "all" or kind == p_kind:
-                entries.append({
-                    "name": p.get("name"),
-                    "id": p.get("uri"),
-                    "format": "lv2",
-                    "vendor": p.get("vendor", ""),
-                    "kind": p_kind,
-                    "bundle": p.get("bundle"),
-                    "classes": p.get("classes", []),
-                })
+            if kind in ("all", p_kind):
+                entries.append({"name": p.get("name"), "id": p.get("uri"), "format": "lv2", "vendor": p.get("vendor", ""), "kind": p_kind, "bundle": p.get("bundle"), "classes": p.get("classes", [])})
     except Exception:
         pass
 
-    # Filter out quarantined plugins
     non_quarantined = quarantine_mod.filter_quarantined(entries)
     quarantined = [e for e in entries if quarantine_mod.is_quarantined(e.get("module") or e.get("bundle") or e.get("id") or e.get("name"))]
-
-    if search:
-        search_lower = search.casefold()
-        filtered = [
-            e for e in non_quarantined
-            if search_lower in str(e.get("name", "")).casefold()
-            or search_lower in str(e.get("vendor", "")).casefold()
-            or search_lower in str(e.get("id", "")).casefold()
-            or search_lower in str(e.get("module", "")).casefold()
-        ]
-    else:
-        filtered = non_quarantined
-
+    s_low = search.casefold() if search else ""
+    filtered = [e for e in non_quarantined if not s_low or any(s_low in str(e.get(k, "")).casefold() for k in ("name", "vendor", "id", "module"))]
     filtered.sort(key=lambda item: (item.get("kind", ""), item.get("format", ""), str(item.get("name", "")).casefold()))
 
     total = len(filtered)
-    if limit_val > 0:
-        page_entries = filtered[offset_val:offset_val + limit_val]
-        next_offset = (offset_val + len(page_entries)) if (offset_val + len(page_entries) < total) else None
-    else:
-        page_entries = filtered[offset_val:]
-        next_offset = None
-
+    page_entries = filtered[offset_val:offset_val + limit_val] if limit_val > 0 else filtered[offset_val:]
+    next_offset = (offset_val + len(page_entries)) if (limit_val > 0 and offset_val + len(page_entries) < total) else None
     return json.dumps({
-        "count": len(page_entries),
-        "total": total,
-        "offset": offset_val,
-        "limit": limit_val,
-        "next_offset": next_offset,
-        "instruments": page_entries,
-        "quarantined_plugins": quarantined,
+        "count": len(page_entries), "total": total, "offset": offset_val, "limit": limit_val,
+        "next_offset": next_offset, "instruments": page_entries, "quarantined_plugins": quarantined,
     }, indent=2)
 
 
@@ -2540,13 +2473,7 @@ async def plugin_params(
     if not plugin:
         return json.dumps({"error": "plugin is required; pass a plugin name or bundle path"})
     try:
-        result = plugin_params_mod.get_plugin_parameters(
-            plugin=plugin,
-            preset=preset,
-            search=search,
-            details=details,
-        )
-        return json.dumps(result, indent=2)
+        return json.dumps(plugin_params_mod.get_plugin_parameters(plugin=plugin, preset=preset, search=search, details=details), indent=2)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
@@ -2573,20 +2500,13 @@ async def save_preset(
         state: Optional starting base64 component state
         params: Parameter overrides (e.g. {'Filter/Cutoff': '1.2 kHz', 'Resonance': 0.7})
     """
-    plugin = plugin.strip()
+    plugin, out = plugin.strip(), out.strip()
     if not plugin:
         return json.dumps({"error": "plugin is required; pass a plugin name or bundle path"})
-    if not out.strip():
+    if not out:
         return json.dumps({"error": "out path is required; pass a destination path like music/presets/patch.vstpreset"})
     try:
-        result = plugin_params_mod.save_plugin_preset_file(
-            plugin=plugin,
-            out_path=out,
-            base_preset=preset,
-            base_state=state,
-            params=params or {},
-        )
-        return json.dumps(result, indent=2)
+        return json.dumps(plugin_params_mod.save_plugin_preset_file(plugin=plugin, out_path=out, base_preset=preset, base_state=state, params=params or {}), indent=2)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
@@ -2600,11 +2520,9 @@ async def patch_card(
 ) -> str:
     """Plays each patch through one probe and returns its acoustic profile.
 
-    Renders a standardized 4-second probe phrase (held middle note, octave jumps,
-    4-note chord, fast 16ths run) through MXM DAW and measures acoustic metrics:
-    attack transient time, decay tail, detected fundamental pitch drift, octave
-    transpositions, harmonic band balance (sub, low-mid, high-mid, brightness),
-    silent low notes, and pre-note noise. Automatically quarantines crashing plugins.
+    Renders a standardized 4-second probe phrase through MXM DAW and measures
+    acoustic metrics: attack transient time, decay tail, detected fundamental
+    pitch drift, harmonic band balance. Automatically quarantines crashing plugins.
 
     Args:
         patches: List of patch dictionaries: [{'plugin': 'Surge XT', 'preset': 'Warm Pad'}, ...]
@@ -2613,28 +2531,16 @@ async def patch_card(
     """
     if not isinstance(patches, list) or not patches:
         return json.dumps({"error": "patches must be a non-empty list of patch dictionaries"})
-
     results = []
     for item in patches:
         if not isinstance(item, dict) or "plugin" not in item:
             results.append({"error": "Each patch entry must specify 'plugin'"})
             continue
         try:
-            report = audition_mod.audition_plugin(
-                item["plugin"],
-                preset=item.get("preset", ""),
-                state=item.get("state", ""),
-                output_dir=out if out else None,
-                keep_audio=keep_audio,
-            )
-            results.append(report)
+            results.append(audition_mod.audition_plugin(item["plugin"], preset=item.get("preset", ""), state=item.get("state", ""), output_dir=out or None, keep_audio=keep_audio))
         except Exception as exc:
             results.append({"plugin": item.get("plugin"), "error": str(exc)})
-
-    return json.dumps({
-        "count": len(results),
-        "patches": results,
-    }, indent=2)
+    return json.dumps({"count": len(results), "patches": results}, indent=2)
 
 
 # ──────────────────────────────────────────────────────────────────
