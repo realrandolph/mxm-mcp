@@ -1937,6 +1937,20 @@ async def load_native_plugin_preset(
             requested_source = str(requested.resolve()) if requested.exists() else preset
             selected = next((item for item in indexed
                              if item.get("id") == preset or item.get("source") == requested_source), None)
+            if selected is None:
+                lowered = preset.strip().casefold()
+                exact_name = [item for item in indexed if str(item.get("name", "")).casefold() == lowered]
+                if len(exact_name) == 1:
+                    selected = exact_name[0]
+                elif not exact_name:
+                    cat_name = [item for item in indexed
+                                if f"{str(item.get('category', '')).casefold()}/{str(item.get('name', '')).casefold()}" == lowered]
+                    if len(cat_name) == 1:
+                        selected = cat_name[0]
+                    else:
+                        partial = [item for item in indexed if lowered in str(item.get("name", "")).casefold()]
+                        if len(partial) == 1:
+                            selected = partial[0]
             if selected is None or not vst3_presets.preset_matches_plugin(
                     selected, module=module, cid=cid):
                 raise ValueError("Preset is not indexed for this VST3 plugin")
@@ -1964,6 +1978,17 @@ async def load_native_plugin_preset(
             requested_source = str(requested_path.resolve()) if requested_path.exists() else preset
             selected = next((item for item in index["presets"]
                              if item.get("id") == preset or item.get("source") == requested_source), None)
+            if selected is None:
+                lowered = preset.strip().casefold()
+                exact_name = [item for item in index["presets"]
+                              if item.get("plugin_uri") == uri and str(item.get("name", "")).casefold() == lowered]
+                if len(exact_name) == 1:
+                    selected = exact_name[0]
+                elif not exact_name:
+                    partial = [item for item in index["presets"]
+                               if item.get("plugin_uri") == uri and lowered in str(item.get("name", "")).casefold()]
+                    if len(partial) == 1:
+                        selected = partial[0]
             if selected is None or selected.get("plugin_uri") != uri:
                 raise ValueError("Preset is not indexed for this LV2 plugin")
             if not selected.get("loadable"):
