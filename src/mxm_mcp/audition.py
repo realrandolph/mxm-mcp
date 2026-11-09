@@ -506,12 +506,13 @@ def analyze_probe_audio(source, *, sample_rate: int | None = None, lead_in: floa
 
 
 def audition_plugin(
-    plugin: str, *, kind: str = "", cid: str = "", state: str = "", name: str = "",
+    plugin: str, *, kind: str = "", cid: str = "", state: str = "", preset: str = "", name: str = "",
     binary: str | Path | None = None, timeout: float = PROBE_TIMEOUT_SECONDS,
     allow_quarantined: bool = False, output_dir: str | Path | None = None, keep_audio: bool | None = None,
 ) -> dict:
     identity = str(plugin).strip()
     if not identity: return {"ok": False, "plugin": identity, "error": "A plugin is required"}
+    state = state or preset
     if quarantine.is_quarantined(identity) and not allow_quarantined:
         rec = quarantine.quarantined_entry(identity)
         reason = rec.get("reason") if rec else ""

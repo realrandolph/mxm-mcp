@@ -267,3 +267,4 @@ def test_unquarantine_allows_a_retry(tmp_path, monkeypatch):
     assert quarantine.unquarantine_plugin("tripleoscillator") is True
     monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(synthetic_probe(include_c2=True)))
     assert audition.audition_plugin("tripleoscillator", binary=tmp_path / "mxm")["ok"] is True
+    assert audition.audition_plugin("tripleoscillator", preset="preset.vstpreset", binary=tmp_path / "mxm")["ok"] is True
