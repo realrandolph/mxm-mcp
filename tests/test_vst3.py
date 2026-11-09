@@ -437,13 +437,14 @@ class TestVst3ServerTools:
     def test_list_instruments_and_effects(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT"),
                                   _descriptor(name="ZamComp", sub_categories="Fx|Dynamics")])
-        payload = json.loads(self._run(srv.list_vst3_instruments()))
-        assert payload["host"] == "vst3instrument"
-        assert payload["native"] is True and payload["carla"] is False
-        assert payload["instrument_count"] == 1
-        assert [p["name"] for p in payload["plugins"]] == ["Surge XT"]
-        payload = json.loads(self._run(srv.list_vst3_instruments(include_effects=True)))
-        assert payload["effect_count"] == 1 and len(payload["plugins"]) == 2
+        payload = json.loads(self._run(srv.list_instruments(kind="instrument")))
+        names = [p["name"] for p in payload["instruments"]]
+        assert "Surge XT" in names
+        assert "ZamComp" not in names
+        payload_all = json.loads(self._run(srv.list_instruments(kind="all", limit=0)))
+        all_names = [p["name"] for p in payload_all["instruments"]]
+        assert "Surge XT" in all_names
+        assert "ZamComp" in all_names
 
     def test_add_by_name_writes_native_vst3(self, monkeypatch):
         self._patch(monkeypatch, [_descriptor(name="Surge XT")])

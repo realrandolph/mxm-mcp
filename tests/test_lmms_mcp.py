@@ -928,11 +928,12 @@ class TestMxmAppConfiguration:
         assert hasattr(srv, "get_mxm_info")
         assert not hasattr(srv, "get_lmms_info")
 
-    def test_list_available_plugins_reports_mxm_found(self):
+    def test_list_instruments_reports_instruments(self):
+        import asyncio
         from mxm_mcp import server as srv
-        result = json.loads(srv.list_available_plugins())
-        assert "mxm_found" in result
-        assert "lmms_found" not in result
+        result = json.loads(asyncio.run(srv.list_instruments()))
+        assert "instruments" in result
+        assert result["count"] >= 1
 
     def test_projects_dir_env_override(self, monkeypatch, tmp_path):
         from mxm_mcp import server as srv
@@ -1059,46 +1060,6 @@ class TestCustomPluginsAndVst:
         track = add_instrument_track(root, "LV2", instrument="lv2instrument")
         with pytest.raises(ValueError, match="require.*URI"):
             configure_native_lv2_instrument(track, "not-a-uri")
-
-    def test_carla_rejects_unknown_plugin_identifier(self):
-        from mxm_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
-        import tempfile
-        root = create_empty_project()
-        add_instrument_track(root, "Carla", instrument="carlarack")
-        with tempfile.TemporaryDirectory() as tmp:
-            plugin = Path(tmp) / "unknown.vst3"
-            plugin.mkdir()
-            with pytest.raises(ValueError, match="identifier is required"):
-                load_carla_plugin(root, 0, plugin)
-
-    def test_carla_rejects_surge_vst3_and_clap(self):
-        from mxm_mcp.xml_parser import create_empty_project, add_instrument_track, load_carla_plugin
-        root = create_empty_project()
-        add_instrument_track(root, "Carla", instrument="carlarack")
-        with tempfile.TemporaryDirectory() as tmp:
-            vst3 = Path(tmp) / "Surge XT.vst3"
-            vst3.mkdir()
-            clap = Path(tmp) / "Surge XT.clap"
-            clap.write_bytes(b"plugin")
-            for plugin in (vst3, clap):
-                with pytest.raises(ValueError, match="must use.*LV2"):
-                    load_carla_plugin(root, 0, plugin)
-
-    def test_carla_regression_fixture_contains_reference_state_and_note(self):
-        from mxm_mcp import xml_parser
-        fixture = Path(__file__).parent / "fixtures" / "carla_surge_regression.mmp"
-        root = xml_parser.load_project(fixture)
-        state = root.find(".//CARLA-PROJECT")
-        assert state.get("VERSION") == "2.5"
-        assert state.findtext("Plugin/Info/URI") == xml_parser.SURGE_XT_LV2_URI
-        custom_keys = [
-            item.text for item in state.findall("Plugin/Data/CustomData/Key")
-        ]
-        assert f"{xml_parser.SURGE_XT_LV2_URI}:StateString" in custom_keys
-        note = root.find(".//track[@name='Carla Surge']/midiclip/note")
-        if note is None:
-            note = root.find(".//track[@name='Carla Surge']/pattern/note")
-        assert note.get("key") == "60"
 
     def test_linux_effect_serialization(self):
         from mxm_mcp.effects import add_external_effect

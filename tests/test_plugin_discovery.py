@@ -902,9 +902,8 @@ def test_native_plugin_and_preset_tools_filter_and_refresh(tmp_path, monkeypatch
     monkeypatch.setattr(vst3_presets, "preset_search_paths",
                         lambda plugins=None, **kwargs: [])
     monkeypatch.delenv("LV2_PATH", raising=False)
-    plugins = json.loads(_run_tool(server.list_native_plugins("lv2")))
-    assert plugins["count"] == 1
-    assert plugins["plugins"][0]["uri"] == PLUGIN_URI
+    instruments = json.loads(_run_tool(server.list_instruments(kind="all")))
+    assert any(i.get("id") == PLUGIN_URI for i in instruments["instruments"])
     presets = json.loads(_run_tool(server.list_plugin_presets(
         plugin=PLUGIN_URI, plugin_type="lv2", tags="warm", author="ada")))
     assert presets["total"] == 1

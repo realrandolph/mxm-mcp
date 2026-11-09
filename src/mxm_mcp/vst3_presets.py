@@ -11,11 +11,21 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from . import discovery_cache
+from . import preset_catalog
+from . import preset_formats
 from . import vst3
 from .path_safety import resolved_path_within
 
 _VST3_EXTENSIONS = {".vstpreset"}
 _UHE_EXTENSIONS = {".h2p", ".uhe-preset"}
+_CATALOG_EXTENSIONS = preset_formats.SUPPORTED_EXTENSIONS - _VST3_EXTENSIONS - _UHE_EXTENSIONS
+_SUPPORTED_EXTENSIONS = _VST3_EXTENSIONS | _UHE_EXTENSIONS | _CATALOG_EXTENSIONS
+_BANK_EXTENSIONS = preset_formats.BANK_EXTENSIONS
+_ALWAYS_LOADABLE_FORMATS = {
+    "nksf", "serum", "dx7", "juce-valuetree", "juce-xml",
+    "decentsampler", "soundbox", "juce-string", "fxp", "cherry",
+}
+_BASE_STATE_FORMATS = {"serumfx", "synplant", "echobode", "permut8"}
 _CLASS_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _INVALID_PRESET_PATH_CHARS = re.compile(r'[\\/*?:"<>|\x00]')
 _MAX_CHUNKS = 256
@@ -71,6 +81,7 @@ def preset_search_paths(
         bases = standard_preset_dirs() + explicit_roots
         paths: list[Path] = list(explicit_roots)
         for plugin in plugins:
+            paths.extend(preset_catalog.vendor_preset_dirs(plugin))
             bundle = Path(plugin.get("module", ""))
             name = str(plugin.get("name", "")).strip()
             vendor = str(plugin.get("vendor", "")).strip()
@@ -122,6 +133,8 @@ def preset_search_paths(
         # <Plugin>.data banks beside their installed bundles.
         paths += _path_entries("VST3_PATH")
         paths += vst3.standard_vst3_dirs()
+        for plugin in plugins:
+            paths.extend(preset_catalog.vendor_preset_dirs(plugin))
         for plugin in plugins:
             bundle = Path(plugin.get("module", ""))
             name = str(plugin.get("name", "")).strip()
@@ -197,7 +210,7 @@ def _collect_files(roots: list[Path]) -> list[Path]:
                         continue
                 else:
                     resolved = entry
-                if resolved.is_file() and entry.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
+                if resolved.is_file() and entry.suffix.lower() in _SUPPORTED_EXTENSIONS:
                     add_file(resolved)
                 elif resolved.is_dir() and (
                         not entry.is_symlink() or entry.suffix.lower() == ".vst3"):
@@ -212,7 +225,7 @@ def _collect_files(roots: list[Path]) -> list[Path]:
             continue
         if resolved_root.is_dir():
             walk(resolved_root, resolved_root)
-        elif resolved_root.is_file() and root.suffix.lower() in _VST3_EXTENSIONS | _UHE_EXTENSIONS:
+        elif resolved_root.is_file() and root.suffix.lower() in _SUPPORTED_EXTENSIONS:
             add_file(resolved_root)
         if scanned > _MAX_PRESET_SCAN_ENTRIES or len(found) >= _MAX_PRESET_FILES:
             break
@@ -361,6 +374,86 @@ def parse_h2p(path: str | Path, *, include_state: bool = False) -> dict:
         return {**info, "error": f"could not read preset: {exc}"}
 
 
+def _catalog_roots(plugins: list[dict]) -> list[tuple[str, dict]]:
+    """Resolved vendor preset roots paired with the plugin that owns them."""
+    roots: list[tuple[str, dict]] = []
+    grouped: dict[Path, dict] = {}
+    for directory, plugin in preset_catalog.catalog_roots_by_plugin(plugins):
+        grouped.setdefault(Path(os.path.normpath(os.path.abspath(str(directory)))), plugin)
+    for directory, plugin in grouped.items():
+        try:
+            roots.append((str(directory.resolve(strict=True)), plugin))
+        except (OSError, RuntimeError):
+            pass
+    return roots
+
+
+def _owning_plugin(path: Path, roots: list[tuple[str, dict]], plugins: list[dict] | None = None) -> dict | None:
+    try:
+        resolved = str(path.resolve(strict=True))
+    except (OSError, RuntimeError):
+        resolved = str(path)
+    owner, best = None, -1
+    for root, plugin in roots:
+        try:
+            Path(resolved).relative_to(root)
+        except ValueError:
+            continue
+        if len(root) > best:
+            best, owner = len(root), plugin
+    if owner is None and plugins:
+        fmt = preset_formats.detect_format(path)
+        return next((p for p in plugins if preset_catalog.preset_belongs_to(p, path, fmt)), None)
+    return owner
+
+
+def _nks_owner(parsed: preset_formats.DecodedPreset, plugins: list[dict]) -> dict | None:
+    """Associate an NKS file by VST3 uid, VST2 magic, or bank name."""
+    uid, magic, bank = parsed.uid.upper(), parsed.magic.upper(), preset_catalog.squash(parsed.bank)
+    for p in plugins:
+        cid = str(p.get("cid", "")).upper()
+        if (uid and cid == uid) or (magic and magic in cid) or (bank and bank == preset_catalog.squash(str(p.get("name", "")))):
+            return p
+    return None
+
+
+def _catalog_loadable(format_name: str, path: Path) -> bool:
+    return format_name in _ALWAYS_LOADABLE_FORMATS and not (format_name == "cherry" and path.suffix.lower() == ".voltagepreset")
+
+
+def _catalog_preset_record(
+    parsed: preset_formats.DecodedPreset, plugin: dict, path: Path, *, selector: int | None = None, program_name: str = "",
+) -> dict:
+    source = str(path) + (f"#{selector}" if selector is not None else "")
+    meta = {k: v for k, v in [("vendor", parsed.vendor), ("bank", parsed.bank), ("category", parsed.category)] if v}
+    return {
+        "id": source, "name": program_name or parsed.program_name or parsed.name or path.stem,
+        "bank": parsed.bank or path.stem, "category": parsed.category or path.parent.name or None,
+        "author": parsed.vendor or None, "tags": [], "character": None, "origin": _origin(path),
+        "source": source, "format": parsed.format, "plugin_uri": None,
+        "plugin_name": plugin.get("name"), "plugin_is_instrument": bool(plugin.get("is_instrument")),
+        "plugin_module": plugin.get("module"), "plugin_cid": plugin.get("cid"),
+        "loadable": _catalog_loadable(parsed.format, path),
+        "state_chunks": [parsed.format], "requires_controller_state": False,
+        "unsupported_state_chunks": [], "metadata": meta,
+        **({"program_index": selector} if selector is not None else {}),
+    }
+
+
+def _catalog_bank_records(path: Path, plugin: dict, format_name: str) -> list[dict]:
+    try:
+        programs = preset_catalog.bank_programs(path)
+    except (OSError, preset_formats.PresetFormatError):
+        return []
+    return [
+        _catalog_preset_record(
+            preset_formats.DecodedPreset(format=format_name, bank=path.stem, category=path.stem),
+            plugin, path, selector=p.index, program_name=p.name or f"{path.stem} #{p.index}",
+        )
+        for p in programs
+    ]
+
+
 def _associate_preset(preset: dict, plugins: list[dict], path: Path) -> dict:
     cid = str(preset.get("cid", "")).upper()
     plugin = next((item for item in plugins if item.get("cid", "").upper() == cid), None)
@@ -421,15 +514,30 @@ def discover_vst3_presets(
 
     def build() -> dict:
         presets: list[dict] = []
+        catalog_roots = _catalog_roots(plugins)
         for path in _collect_files(paths):
-            if path.suffix.lower() == ".vstpreset":
-                parsed = parse_vstpreset(path)
-            elif path.suffix.lower() in _UHE_EXTENSIONS:
-                parsed = parse_h2p(path)
-            else:
+            suffix = path.suffix.lower()
+            if suffix == ".vstpreset" or suffix in _UHE_EXTENSIONS:
+                parsed = parse_vstpreset(path) if suffix == ".vstpreset" else parse_h2p(path)
+                presets.append(_associate_preset(parsed, plugins, path))
                 continue
-            record = _associate_preset(parsed, plugins, path)
-            presets.append(record)
+            owner = _owning_plugin(path, catalog_roots, plugins)
+            if suffix in _BANK_EXTENSIONS and owner is not None:
+                presets.extend(_catalog_bank_records(
+                    path, owner, preset_formats.detect_format(path)))
+                continue
+            if owner is None and suffix not in {".nksf", ".nksfx"}:
+                continue
+            try:
+                parsed = preset_formats.describe_preset(path)
+            except (OSError, preset_formats.PresetFormatError):
+                continue
+            target = owner
+            if target is None and parsed.format == "nksf":
+                target = _nks_owner(parsed, plugins)
+            if target is None:
+                continue
+            presets.append(_catalog_preset_record(parsed, target, path))
         presets.sort(key=lambda item: (str(item.get("plugin_name") or "").casefold(),
                                        str(item.get("name") or "").casefold(),
                                        item["source"].casefold()))
@@ -445,12 +553,17 @@ def discover_vst3_presets(
 
 
 def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str | None:
-    """Read at most one selected component chunk or h2p stream, after rechecking its root and CID."""
+    """Read and decode at most one selected component chunk or preset file.
+
+    The source is rechecked against the indexed roots, so a preset record
+    cannot be pointed at an arbitrary path after discovery.
+    """
     source = preset.get("source")
     if not source or not preset.get("loadable") or preset.get("requires_controller_state"):
         return None
+    source_path, selector = preset_catalog.split_bank_reference(source)
     safe_path = next((resolved for root in search_paths
-                      if (resolved := resolved_path_within(source, root)) is not None), None)
+                      if (resolved := resolved_path_within(source_path, root)) is not None), None)
     if safe_path is None:
         return None
     suffix = safe_path.suffix.lower()
@@ -462,12 +575,22 @@ def load_vst3preset_state(preset: dict, search_paths: list[str | Path]) -> str |
                 or parsed.get("unsupported_state_chunks")):
             return None
         return parsed.get("state")
-    elif suffix in _UHE_EXTENSIONS:
+    if suffix in _UHE_EXTENSIONS:
         parsed = parse_h2p(safe_path, include_state=True)
-        if not parsed.get("loadable"):
-            return None
-        return parsed.get("state")
-    return None
+        return parsed.get("state") if parsed.get("loadable") else None
+    if suffix not in _CATALOG_EXTENSIONS:
+        return None
+    program = preset.get("program_index")
+    if program is None and selector is not None:
+        program = int(selector) if selector.lstrip("+-").isdigit() else selector
+    if isinstance(program, int) and program < 0:
+        program = None
+    try:
+        decoded = preset_formats.decode_preset(safe_path, format=str(preset.get("format") or ""), selector=program)
+    except (OSError, preset_formats.PresetFormatError):
+        return None
+    state = decoded.state
+    return base64.b64encode(state).decode("ascii") if state and len(state) <= _MAX_COMPONENT_BYTES else None
 
 
 def preset_matches_plugin(preset: dict, *, module: str = "", cid: str = "") -> bool:

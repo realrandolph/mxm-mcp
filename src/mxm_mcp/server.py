@@ -6,6 +6,7 @@ MXM is the digital audio workstation (DAW) these tools drive; project files
 keep the ``lmms-project`` XML format MXM's engine reads.
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,11 @@ from . import vst3_probe
 from . import vst3_presets
 from . import xml_parser
 from . import composition
+from . import audition as audition_mod
+from . import plugin_params as plugin_params_mod
+from . import preset_catalog as preset_catalog_mod
+from . import preset_formats as preset_formats_mod
+from . import quarantine as quarantine_mod
 from .musical_units import MusicalUnitError
 from .path_safety import resolved_path_within
 from .models import (
@@ -82,8 +88,6 @@ KNOWN_INSTRUMENTS = {
     "gigplayer": "GIG sample library player",
     "bitinvader": "Bit-crushed wavetable synth",
     "vestige": "VST plugin host (Windows only)",
-    "carlarack": "Carla Rack bridge for Linux/macOS plugins",
-    "carlapatchbay": "Carla Patchbay bridge for Linux/macOS plugins",
 }
 
 # Recommended instruments per use case - helps agents pick valid plugins
@@ -312,8 +316,10 @@ def add_instrument_track(
     proj = get_project()
 
     if instrument.strip().lower() in {"carlarack", "carlapatchbay"}:
-        if not mxm_app.mxm_supports_carla():
-            return json.dumps({"error": "Installed MXM does not expose Carla Rack/Patchbay plugins"})
+        return json.dumps({
+            "error": "Carla is not supported. Use native VST3 "
+                     "(add_vst3_instrument_track) or native LV2 (add_lv2_instrument_track).",
+        })
 
     if instrument.strip().lower() == xml_parser.NATIVE_VST3_HOST:
         return json.dumps({
@@ -1286,40 +1292,6 @@ def render_project(
 
 
 @mcp.tool()
-def list_available_plugins() -> str:
-    """List ALL plugins installed in your MXM, dynamically detected.
-
-    Includes built-in instruments/effects plus any custom plugins the
-    user added to MXM's plugins folder. Custom plugins can be used
-    directly by name in add_instrument_track / add_effect.
-    """
-    known_inst = set(KNOWN_INSTRUMENTS.keys())
-    if not mxm_app.mxm_supports_carla():
-        known_inst -= {"carlarack", "carlapatchbay"}
-    known_eff = set(effects_mod.KNOWN_EFFECTS.keys())
-    classified = mxm_app.classify_installed_plugins(known_inst, known_eff)
-    binary = mxm_app.find_mxm_binary()
-    return json.dumps({
-        "mxm_found": binary is not None,
-        "version": mxm_app.get_mxm_version(),
-        "built_in_instruments": sorted(known_inst),
-        "built_in_effects": sorted(known_eff),
-        "custom_plugins_unknown_type": classified["unknown"],
-        "carla_instruments": [name for name in ("carlarack", "carlapatchbay")
-                              if mxm_app.mxm_supports_carla()],
-        "native_vst3_instrument_host": {
-            "plugin": xml_parser.NATIVE_VST3_HOST,
-            "mxm_available": mxm_app.mxm_supports_native_vst3(),
-            "tools": ["list_vst3_instruments", "add_vst3_instrument_track"],
-        },
-        "note": "Custom plugins can be used by their DLL name in "
-                "add_instrument_track or add_effect. For legacy VST .dll "
-                "files use add_vst_track; for native VST3 use "
-                "list_vst3_instruments + add_vst3_instrument_track (not Carla).",
-    }, indent=2)
-
-
-@mcp.tool()
 def scan_linux_plugins(directory: str, recursive: bool = True) -> str:
     """Discover VST3, CLAP, LV2, and LADSPA plugins on Linux."""
     try:
@@ -1327,51 +1299,6 @@ def scan_linux_plugins(directory: str, recursive: bool = True) -> str:
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps({"directory": directory, "count": len(plugins), "plugins": plugins}, indent=2)
-
-
-@mcp.tool()
-def add_carla_instrument_track(
-    name: str,
-    bridge: str = "carlarack",
-    mixer_channel: int = 0,
-    volume: int = 100,
-    panning: int = 0,
-) -> str:
-    """Add an LMMS Carla Rack or Patchbay instrument track."""
-    bridge = bridge.strip().lower()
-    if bridge not in {"carlarack", "carlapatchbay"}:
-        return json.dumps({"error": "bridge must be 'carlarack' or 'carlapatchbay'"})
-    if not mxm_app.mxm_supports_carla():
-        return json.dumps({"error": "Installed MXM does not expose Carla plugins"})
-    project = get_project()
-    result = project.add_track("instrument", name, instrument=bridge,
-                               mixer_channel=mixer_channel, volume=volume,
-                               panning=panning)
-    if bridge == "carlarack":
-        xml_parser.configure_reference_carla_track(
-            xml_parser.find_track_element(project.root, result["track_index"])
-        )
-    result["bridge"] = bridge
-    return json.dumps(result)
-
-
-@mcp.tool()
-def load_carla_plugin(
-    track_index: int,
-    plugin_path: str,
-    plugin_id: str = "",
-) -> str:
-    """Load an installed VST3, CLAP, or LV2 plugin into a Carla track.
-
-    Surge XT uses MXM's native LV2 instrument host; use add_surge_xt_track.
-    """
-    try:
-        result = xml_parser.load_carla_plugin(get_project().root, track_index,
-                                              plugin_path, plugin_id)
-        get_project()._modified = True
-        return json.dumps(result)
-    except (ValueError, OSError) as exc:
-        return json.dumps({"error": str(exc)})
 
 
 @mcp.tool()
@@ -1609,7 +1536,8 @@ async def _authorized_vst3_plugins(
         }]
     approved: dict[str, plugin_permissions.PluginIdentity] = {}
     denied: list[dict] = []
-    can_elicit = _client_supports_plugin_elicitation(ctx)
+    listing_action = action == "list_instruments"
+    can_elicit = _client_supports_plugin_elicitation(ctx) and not listing_action
 
     for bundle in bundles:
         try:
@@ -1642,7 +1570,10 @@ async def _authorized_vst3_plugins(
                     f"SHA-256: {identity.sha256}"
                 )
                 try:
-                    response = await ctx.elicit(message, _PluginPermissionChoice)
+                    response = await asyncio.wait_for(
+                        ctx.elicit(message, _PluginPermissionChoice),
+                        timeout=10.0,
+                    )
                 except Exception as exc:
                     denied.append({"module": identity.module,
                                    "reason": f"permission prompt failed: {type(exc).__name__}"})
@@ -1656,9 +1587,9 @@ async def _authorized_vst3_plugins(
                     "Deny": "deny",
                 }[response.data.decision]
             else:
-                if ctx is None:
+                if ctx is None or listing_action:
                     denied.append({"module": identity.module,
-                                   "reason": "permission context unavailable; plugin not executed"})
+                                   "reason": "unapproved binary; probe not executed"})
                     continue
                 token = plugin_permissions.create_pending(action, arguments, identity)
                 raise plugin_permissions.PendingAccessError(token, identity)
@@ -1748,51 +1679,6 @@ async def resolve_native_plugin_access(
     return json.dumps(result, default=str)
 
 
-@mcp.tool()
-async def list_vst3_instruments(
-    include_effects: bool = False,
-    refresh: bool = False,
-    ctx: Context | None = None,
-) -> str:
-    """List native VST3 plugins for MXM's built-in VST3 host (not Carla).
-
-    Reads each module's real class id from the locations MXM scans
-    (``$HOME/.vst3``, ``/usr/lib*/vst3``, ``/usr/local/lib*/vst3``, MXM's app
-    ``vst3`` dir, ``VST3_PATH``), per platform. Pass a plugin's ``module`` +
-    ``cid`` to add_vst3_instrument_track.
-
-    Args:
-        include_effects: Also list VST3 effects (default: instruments only)
-        refresh: Invalidate cached discovery and rescan plugin bundles
-    """
-    try:
-        plugins, denied = await _authorized_vst3_plugins(
-            ctx, "list_vst3_instruments",
-            {"include_effects": include_effects, "refresh": refresh}, refresh=refresh,
-        )
-    except plugin_permissions.PendingAccessError as exc:
-        return _permission_pending_result(exc)
-    except Exception as exc:  # pragma: no cover - discovery is defensive
-        return json.dumps({"error": f"VST3 discovery failed: {exc}"})
-    instruments = [p for p in plugins if p["is_instrument"]]
-    payload = {
-        "host": xml_parser.NATIVE_VST3_HOST, "native": True, "carla": False,
-        "discovery_supported": vst3_mod.native_vst3_discovery_supported(),
-        "path_only": vst3_mod.path_only_enabled(),
-        "host_available": mxm_app.mxm_supports_native_vst3(),
-        "search_paths": vst3_mod.effective_search_paths(),
-        "instrument_count": len(instruments),
-        "effect_count": len(plugins) - len(instruments),
-        "plugins": plugins if include_effects else instruments,
-        "denied_plugins": denied,
-    }
-    if not payload["discovery_supported"]:
-        payload["warning"] = ("This MCP cannot discover native VST3 plugins on "
-                              "this platform; pass module_path + cid with "
-                              "allow_unverified.")
-    return json.dumps(payload, indent=2)
-
-
 async def _native_plugin_records(
     plugin_type: str,
     refresh: bool,
@@ -1852,158 +1738,6 @@ async def _resolve_native_plugin(
         resolved, candidates = lv2_mod.resolve_plugin(records, plugin)
         return resolved, candidates, records, []
     raise ValueError("plugin_type must be 'vst3' or 'lv2'")
-
-
-_DEFAULT_NATIVE_PLUGINS_LIMIT = 100
-_MAX_NATIVE_PLUGINS_LIMIT = 500
-_MAX_NATIVE_PLUGINS_PAYLOAD_BYTES = 1_000_000
-
-
-def _compact_native_plugin_record(record: dict) -> dict:
-    plugin_type = record.get("plugin_type", "")
-    if plugin_type == "LV2":
-        compact = {
-            "plugin_type": "LV2",
-            "name": record.get("name"),
-            "vendor": record.get("vendor"),
-            "uri": record.get("uri"),
-            "bundle": record.get("bundle"),
-            "is_instrument": bool(record.get("is_instrument", False)),
-            "classes": record.get("classes", []),
-        }
-        if record.get("version") is not None:
-            compact["version"] = record.get("version")
-        return compact
-    if plugin_type == "VST3":
-        compact = {
-            "plugin_type": "VST3",
-            "name": record.get("name"),
-            "vendor": record.get("vendor"),
-            "uri": None,
-            "bundle": record.get("bundle") or record.get("module"),
-            "module": record.get("module"),
-            "cid": record.get("cid"),
-            "is_instrument": bool(record.get("is_instrument", False)),
-            "sub_categories": record.get("sub_categories", ""),
-        }
-        if record.get("version") is not None:
-            compact["version"] = record.get("version")
-        if record.get("class_flags") is not None:
-            compact["class_flags"] = record.get("class_flags")
-        return compact
-    return {
-        key: value for key, value in record.items()
-        if key not in ("ports", "required_features", "source")
-    }
-
-
-@mcp.tool()
-async def list_native_plugins(
-    plugin_type: str = "all",
-    include_effects: bool = True,
-    offset: int = 0,
-    limit: int = 100,
-    details: bool = False,
-    refresh: bool = False,
-    ctx: Context | None = None,
-) -> str:
-    """Enumerate installed native VST3 and LV2 plugins using filesystem metadata.
-
-    Results are paginated and return compact summaries by default to prevent
-    oversized MCP responses on large plugin inventories. Pass ``details=True``
-    or use ``inspect_native_plugin`` for complete port and feature metadata.
-
-    Args:
-        plugin_type: ``all``, ``vst3`` or ``lv2``
-        include_effects: Include effect plugins as well as instruments
-        offset: Zero-based result offset for pagination (default 0)
-        limit: Maximum results per page (1-500, default 100)
-        details: Include full port descriptors and extended metadata (default False)
-        refresh: Rescan after plugin installation or update
-    """
-    plugin_type_str = str(plugin_type).strip().lower()
-    if plugin_type_str not in {"all", "vst3", "lv2"}:
-        return json.dumps({"error": "plugin_type must be 'all', 'vst3', or 'lv2'"})
-    try:
-        offset_val = max(0, int(offset))
-        limit_val = min(_MAX_NATIVE_PLUGINS_LIMIT, max(1, int(limit)))
-    except (TypeError, ValueError) as exc:
-        return json.dumps({"error": f"Invalid pagination parameters: {exc}"})
-
-    details_bool = bool(details)
-    include_effects_bool = bool(include_effects)
-    refresh_bool = bool(refresh)
-
-    try:
-        call_args = {
-            "plugin_type": plugin_type_str,
-            "include_effects": include_effects_bool,
-            "offset": offset_val,
-            "limit": limit_val,
-            "details": details_bool,
-            "refresh": refresh_bool,
-        }
-        plugins, paths, denied = await _native_plugin_records(
-            plugin_type_str, refresh_bool, ctx, "list_native_plugins", call_args,
-        )
-    except plugin_permissions.PendingAccessError as exc:
-        return _permission_pending_result(exc)
-    except Exception as exc:
-        return json.dumps({"error": f"Native plugin discovery failed: {exc}"})
-
-    if not include_effects_bool:
-        plugins = [plugin for plugin in plugins if plugin.get("is_instrument")]
-    plugins.sort(key=lambda item: (item.get("plugin_type", "").casefold(),
-                                   item.get("name", "").casefold(),
-                                   item.get("uri") or item.get("module", "")))
-
-    total = len(plugins)
-    selected = plugins[offset_val:offset_val + limit_val]
-
-    # Guard against oversized serialized responses
-    page_plugins: list[dict] = []
-    base_payload = {
-        "count": 0,
-        "total": total,
-        "offset": offset_val,
-        "limit": limit_val,
-        "next_offset": None,
-        "plugin_type": plugin_type_str,
-        "search_paths": paths,
-        "plugins": [],
-        "denied_plugins": denied,
-    }
-    base_bytes = len(json.dumps(base_payload, indent=2))
-    current_bytes = base_bytes
-    truncated = False
-
-    for item in selected:
-        record = item if details_bool else _compact_native_plugin_record(item)
-        record_bytes = len(json.dumps(record, indent=2)) + 4
-        if page_plugins and (current_bytes + record_bytes > _MAX_NATIVE_PLUGINS_PAYLOAD_BYTES):
-            truncated = True
-            break
-        page_plugins.append(record)
-        current_bytes += record_bytes
-
-    next_offset = (offset_val + len(page_plugins)) if (offset_val + len(page_plugins) < total) else None
-
-    result = {
-        "count": len(page_plugins),
-        "total": total,
-        "offset": offset_val,
-        "limit": limit_val,
-        "next_offset": next_offset,
-        "plugin_type": plugin_type_str,
-        "search_paths": paths,
-        "plugins": page_plugins,
-        "denied_plugins": denied,
-    }
-    if truncated:
-        result["truncated"] = True
-        result["truncation_reason"] = "Response size ceiling reached; use pagination to retrieve remaining records"
-
-    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -2099,6 +1833,15 @@ async def list_plugin_presets(
             scoped_plugins = ([record for record in plugins
                                if _record_matches_plugin_query(record, plugin)]
                               if plugin else plugins)
+            if not scoped_plugins and plugin:
+                for bundle in vst3_mod.find_vst3_bundles():
+                    if _plugin_query_matches(bundle.stem, plugin) or _plugin_query_matches(str(bundle), plugin):
+                        scoped_plugins.append({
+                            "name": bundle.stem,
+                            "module": str(bundle),
+                            "is_instrument": True,
+                        })
+                        break
             if scoped_plugins:
                 all_presets.extend(vst3_presets.discover_vst3_presets(
                     scoped_plugins, refresh=refresh,
@@ -2150,6 +1893,20 @@ async def list_plugin_presets(
                         "presets": public_records}, indent=2)
 
 
+def _find_preset_match(indexed: list[dict], preset: str, req_source: str, filter_fn=None) -> dict | None:
+    cands = [i for i in indexed if filter_fn is None or filter_fn(i)]
+    sel = next((i for i in cands if i.get("id") == preset or i.get("source") == req_source), None)
+    if sel is not None: return sel
+    low = preset.strip().casefold()
+    for match in (
+        [i for i in cands if str(i.get("name", "")).casefold() == low],
+        [i for i in cands if f"{str(i.get('category', '')).casefold()}/{str(i.get('name', '')).casefold()}" == low],
+        [i for i in cands if low in str(i.get("name", "")).casefold()],
+    ):
+        if len(match) == 1: return match[0]
+    return None
+
+
 @mcp.tool()
 async def load_native_plugin_preset(
     track_index: int,
@@ -2192,8 +1949,7 @@ async def load_native_plugin_preset(
             indexed = vst3_index["presets"]
             requested = Path(preset).expanduser()
             requested_source = str(requested.resolve()) if requested.exists() else preset
-            selected = next((item for item in indexed
-                             if item.get("id") == preset or item.get("source") == requested_source), None)
+            selected = _find_preset_match(indexed, preset, requested_source)
             if selected is None or not vst3_presets.preset_matches_plugin(
                     selected, module=module, cid=cid):
                 raise ValueError("Preset is not indexed for this VST3 plugin")
@@ -2219,8 +1975,7 @@ async def load_native_plugin_preset(
             index = lv2_mod.discover_lv2()
             requested_path = Path(preset).expanduser()
             requested_source = str(requested_path.resolve()) if requested_path.exists() else preset
-            selected = next((item for item in index["presets"]
-                             if item.get("id") == preset or item.get("source") == requested_source), None)
+            selected = _find_preset_match(index["presets"], preset, requested_source, filter_fn=lambda i: i.get("plugin_uri") == uri)
             if selected is None or selected.get("plugin_uri") != uri:
                 raise ValueError("Preset is not indexed for this LV2 plugin")
             if not selected.get("loadable"):
@@ -2557,6 +2312,235 @@ def add_vst_track(
     result["vst"] = str(path)
     result["message"] = f"Added VST track '{name}' hosting {path.name}"
     return json.dumps(result)
+
+
+# ──────────────────────────────────────────────────────────────────
+# WAVELENGTH-STYLE PLUGIN, PRESET, AND SOUND TOOLS
+# ──────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def list_instruments(
+    search: str = "",
+    kind: str = "all",
+    offset: int = 0,
+    limit: int = 100,
+    refresh: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """The plugins installed on this computer (VST3, LV2) and MXM's built-in instruments/effects.
+
+    Use the names or ids it gives as a track's 'plugin' or an effect's plugin;
+    never guess them. Automatically filters out quarantined/crashing plugins.
+    Results are paginated (default limit 100) to keep responses compact and
+    within context window limits; pass limit=0 for all matching entries.
+
+    Args:
+        search: Filter entries whose name, vendor, id or module contains this text
+        kind: Filter by ``instrument``, ``effect``, or ``all`` (default)
+        offset: Zero-based result offset for pagination (default 0)
+        limit: Maximum results per page (1-500, default 100; pass 0 for all)
+        refresh: Force a filesystem rescan
+    """
+    kind = kind.strip().lower()
+    if kind not in {"all", "instrument", "effect"}:
+        return json.dumps({"error": "kind must be 'all', 'instrument', or 'effect'"})
+    try:
+        offset_val = max(0, int(offset))
+        limit_val = max(0, int(limit))
+        if limit_val > 500:
+            limit_val = 500
+    except (TypeError, ValueError):
+        offset_val = 0
+        limit_val = 100
+
+    entries: list[dict] = []
+    if kind in {"all", "instrument"}:
+        entries.extend({
+            "name": f"builtin:{k}", "id": k, "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": d,
+        } for k, d in [
+            ("tripleoscillator", "3-oscillator subtractive synth with FM and sync"),
+            ("lb302", "Monophonic 303-style bass synthesizer"),
+            ("kicker", "Drum synthesizer for kicks and percussion"),
+            ("organic", "Additive organ and pad synthesizer"),
+            ("bitinvader", "Wavetable and chiptune synth"),
+            ("monstro", "3-oscillator synth with matrix modulation"),
+            ("watsyn", "4-oscillator wavetable synthesizer"),
+            ("audiofileprocessor", "One-shot and sample player"),
+        ])
+
+    try:
+        vst3_plugins, _ = await _authorized_vst3_plugins(None, "list_instruments", {"search": search, "kind": kind, "refresh": refresh}, refresh=refresh)
+        probed_modules = {p.get("module") for p in vst3_plugins if p.get("module")}
+        for p in vst3_plugins:
+            p_kind = "instrument" if p.get("is_instrument") else "effect"
+            if kind in ("all", p_kind):
+                entries.append({"name": p.get("name"), "id": p.get("cid"), "format": "vst3", "vendor": p.get("vendor", ""), "kind": p_kind, "module": p.get("module"), "sub_categories": p.get("sub_categories", "")})
+        if kind in {"all", "instrument"}:
+            for b in vst3_mod.find_vst3_bundles():
+                if str(b) not in probed_modules:
+                    entries.append({"name": b.stem, "id": str(b), "format": "vst3", "vendor": "Installed VST3", "kind": "instrument", "module": str(b), "sub_categories": ""})
+    except plugin_permissions.PendingAccessError as exc:
+        return _permission_pending_result(exc)
+    except Exception:
+        pass
+
+    try:
+        for p in lv2_mod.discover_lv2(refresh=refresh).get("plugins", []):
+            p_kind = "instrument" if p.get("is_instrument") else "effect"
+            if kind in ("all", p_kind):
+                entries.append({"name": p.get("name"), "id": p.get("uri"), "format": "lv2", "vendor": p.get("vendor", ""), "kind": p_kind, "bundle": p.get("bundle"), "classes": p.get("classes", [])})
+    except Exception:
+        pass
+
+    non_quarantined = quarantine_mod.filter_quarantined(entries)
+    quarantined = [e for e in entries if quarantine_mod.is_quarantined(e.get("module") or e.get("bundle") or e.get("id") or e.get("name"))]
+    s_low = search.casefold() if search else ""
+    filtered = [e for e in non_quarantined if not s_low or any(s_low in str(e.get(k, "")).casefold() for k in ("name", "vendor", "id", "module"))]
+    filtered.sort(key=lambda item: (item.get("kind", ""), item.get("format", ""), str(item.get("name", "")).casefold()))
+
+    total = len(filtered)
+    page_entries = filtered[offset_val:offset_val + limit_val] if limit_val > 0 else filtered[offset_val:]
+    next_offset = (offset_val + len(page_entries)) if (limit_val > 0 and offset_val + len(page_entries) < total) else None
+    return json.dumps({
+        "count": len(page_entries), "total": total, "offset": offset_val, "limit": limit_val,
+        "next_offset": next_offset, "instruments": page_entries, "quarantined_plugins": quarantined,
+    }, indent=2)
+
+
+@mcp.tool()
+async def list_presets(
+    plugin: str,
+    search: str = "",
+    offset: int = 0,
+    limit: int = 200,
+    refresh: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Factory presets and preset files an instrument or effect can load by name.
+
+    Discovers presets across vendor patch trees (Surge XT, Vital, Dexed, u-he,
+    Decent Sampler, Cherry Audio), multi-voice cartridges/banks (.syx#0..31,
+    .fxb#0..N, .p8bank#0..29), NKS bundles, and standard .vstpreset files.
+
+    Args:
+        plugin: Required plugin name, URI, module path, or CID
+        search: Filter presets matching this text
+        offset: Result offset for pagination (default 0)
+        limit: Maximum results (1-1000, default 200)
+        refresh: Force a filesystem rescan
+    """
+    plugin = plugin.strip()
+    if not plugin:
+        return json.dumps({"error": "plugin is required; pass a plugin name, URI, module path, or CID"})
+    try:
+        offset = max(0, int(offset))
+        limit = min(1000, max(1, int(limit)))
+    except (TypeError, ValueError) as exc:
+        return json.dumps({"error": f"Invalid pagination parameters: {exc}"})
+
+    return await list_plugin_presets(
+        plugin=plugin,
+        query=search,
+        offset=offset,
+        limit=limit,
+        refresh=refresh,
+        ctx=ctx,
+    )
+
+
+@mcp.tool()
+async def plugin_params(
+    plugin: str,
+    preset: str = "",
+    search: str = "",
+    details: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """A plugin's parameters with their ranges and display text.
+
+    Optionally evaluates parameter values after loading a starting preset.
+    Reports parameter IDs, names, hierarchical module paths, min/max/default
+    ranges, and formatted display strings (e.g. '800 Hz', '-6 dB', '1/16').
+
+    Args:
+        plugin: The plugin's name or .vst3 bundle path
+        preset: Optional preset file to load before inspecting parameters
+        search: Filter parameters matching this name, Module/Name, or #id
+        details: Include extended technical flags and internal unit IDs
+    """
+    plugin = plugin.strip()
+    if not plugin:
+        return json.dumps({"error": "plugin is required; pass a plugin name or bundle path"})
+    try:
+        return json.dumps(plugin_params_mod.get_plugin_parameters(plugin=plugin, preset=preset, search=search, details=details), indent=2)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def save_preset(
+    plugin: str,
+    out: str,
+    preset: str = "",
+    state: str = "",
+    params: dict | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Save a plugin's sound as a reusable preset file (.vstpreset).
+
+    Starts from a plugin's default state, an existing preset file, or a base64
+    state string, applies parameter overrides (accepting plain numbers or
+    natural text such as '800 Hz' or '-6 dB'), and serializes a valid .vstpreset.
+
+    Args:
+        plugin: The plugin's name or .vst3 bundle path
+        out: Output file path (e.g. music/presets/lead.vstpreset)
+        preset: Optional starting .vstpreset file
+        state: Optional starting base64 component state
+        params: Parameter overrides (e.g. {'Filter/Cutoff': '1.2 kHz', 'Resonance': 0.7})
+    """
+    plugin, out = plugin.strip(), out.strip()
+    if not plugin:
+        return json.dumps({"error": "plugin is required; pass a plugin name or bundle path"})
+    if not out:
+        return json.dumps({"error": "out path is required; pass a destination path like music/presets/patch.vstpreset"})
+    try:
+        return json.dumps(plugin_params_mod.save_plugin_preset_file(plugin=plugin, out_path=out, base_preset=preset, base_state=state, params=params or {}), indent=2)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def patch_card(
+    patches: list[dict],
+    out: str = "",
+    keep_audio: bool = False,
+    ctx: Context | None = None,
+) -> str:
+    """Plays each patch through one probe and returns its acoustic profile.
+
+    Renders a standardized 4-second probe phrase through MXM DAW and measures
+    acoustic metrics: attack transient time, decay tail, detected fundamental
+    pitch drift, harmonic band balance. Automatically quarantines crashing plugins.
+
+    Args:
+        patches: List of patch dictionaries: [{'plugin': 'Surge XT', 'preset': 'Warm Pad'}, ...]
+        out: Optional directory to store rendered probe WAV files
+        keep_audio: Whether to preserve rendered probe audio on disk
+    """
+    if not isinstance(patches, list) or not patches:
+        return json.dumps({"error": "patches must be a non-empty list of patch dictionaries"})
+    results = []
+    for item in patches:
+        if not isinstance(item, dict) or "plugin" not in item:
+            results.append({"error": "Each patch entry must specify 'plugin'"})
+            continue
+        try:
+            results.append(audition_mod.audition_plugin(item["plugin"], preset=item.get("preset", ""), state=item.get("state", ""), output_dir=out or None, keep_audio=keep_audio))
+        except Exception as exc:
+            results.append({"plugin": item.get("plugin"), "error": str(exc)})
+    return json.dumps({"count": len(results), "patches": results}, indent=2)
 
 
 # ──────────────────────────────────────────────────────────────────
