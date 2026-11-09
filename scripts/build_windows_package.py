@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 
@@ -92,7 +92,8 @@ def main() -> int:
             str(HARNESS_ENTRY),
         ]
     )
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    m = re.search(r'version\s*=\s*"([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    version = m.group(1) if m else "0.3.0"
     run([str(iscc), f"/DProductVersion={version}", INSTALLER.name], cwd=INSTALLER.parent)
 
     if not OUTPUT.is_file() or OUTPUT.stat().st_size == 0:
