@@ -140,6 +140,90 @@ def test_build_probe_project_writes_editable_notes(tmp_path):
     assert len(tracks[0].find("midiclip").findall("note")) == 13
 
 
+def test_tripleosc_probe_uses_stock_neutral_oscillator_state(tmp_path):
+    root = xml_parser.load_project(audition.build_probe_project(
+        "tripleoscillator", tmp_path / "probe.mmp", name="Audition only",
+    ))
+
+    tracks = xml_parser.find_tracks(root)
+    assert len(tracks) == 1
+    assert tracks[0].get("name") == "Audition only"
+    instrument = tracks[0].find("instrumenttrack/instrument")
+    assert instrument is not None and instrument.get("name") == "tripleoscillator"
+    assert tracks[0].find("instrumenttrack").get("vol") == "65"
+    oscillator = instrument.find("tripleoscillator")
+    assert oscillator is not None
+    # Use a single centered, in-tune sine oscillator at a reduced track gain;
+    # these probe-only settings must not leak into ordinary project defaults.
+    probe_settings = (
+        "coarse0", "coarse1", "coarse2", "finer0", "finer1", "finer2",
+        "finel0", "finel1", "finel2", "stphdetun0", "stphdetun1",
+        "stphdetun2", "vol0", "vol1", "vol2", "pan0", "pan1", "pan2",
+        "wavetype0", "phoffset0",
+    )
+    assert {key: oscillator.get(key) for key in probe_settings} == {
+        "coarse0": "0", "coarse1": "0", "coarse2": "0",
+        "finer0": "0", "finer1": "0", "finer2": "0",
+        "finel0": "0", "finel1": "0", "finel2": "0",
+        "stphdetun0": "0", "stphdetun1": "0", "stphdetun2": "0",
+        "vol0": "33", "vol1": "0", "vol2": "0",
+        "pan0": "0", "pan1": "0", "pan2": "0",
+        "wavetype0": "0", "phoffset0": "0",
+    }
+
+    normal_root = xml_parser.create_empty_project()
+    xml_parser.add_instrument_track(normal_root, "Ordinary track")
+    normal_oscillator = normal_root.find(".//instrument[@name='tripleoscillator']/tripleoscillator")
+    assert normal_oscillator is not None
+    assert (normal_oscillator.get("vol1"), normal_oscillator.get("vol2")) == ("33", "33")
+    assert (normal_oscillator.get("coarse1"), normal_oscillator.get("coarse2")) == ("-12", "-24")
+
+
+def test_builtin_list_name_resolves_to_canonical_probe_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(synthetic_probe(include_c2=True)))
+    result = audition.audition_plugin(
+        " BUILTIN:TRIPLEOSCILLATOR ", binary=tmp_path / "mxm",
+        output_dir=tmp_path / "canonical-probe",
+    )
+
+    assert result["ok"] is True
+    assert result["plugin"] == "tripleoscillator"
+    assert result["name"] == "builtin:tripleoscillator"
+    root = xml_parser.load_project(tmp_path / "canonical-probe/probe.mmp")
+    track = xml_parser.find_tracks(root)[0]
+    assert track.get("name") == "builtin:tripleoscillator"
+    assert track.find("instrumenttrack/instrument").get("name") == "tripleoscillator"
+
+
+def test_builtin_display_name_resolves_to_canonical_probe_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(synthetic_probe(include_c2=True)))
+    result = audition.audition_plugin(
+        "Triple Oscillator", binary=tmp_path / "mxm",
+        output_dir=tmp_path / "display-name-probe",
+    )
+
+    assert result["ok"] is True
+    assert result["plugin"] == "tripleoscillator"
+    root = xml_parser.load_project(tmp_path / "display-name-probe/probe.mmp")
+    assert xml_parser.find_tracks(root)[0].find("instrumenttrack/instrument").get("name") == "tripleoscillator"
+
+
+def test_unknown_builtin_id_fails_without_render_or_quarantine(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        audition, "_run_render_process",
+        lambda *_args, **_kwargs: pytest.fail("unknown built-in ID must not render"),
+    )
+
+    result = audition.audition_plugin(
+        "builtin:not-a-real-instrument", binary=tmp_path / "mxm",
+    )
+
+    assert result["ok"] is False
+    assert result["quarantined"] is False
+    assert "unknown built-in instrument" in result["error"]
+    assert quarantine.list_quarantined() == []
+
+
 def test_build_probe_project_targets_vst3_state(tmp_path):
     state = base64.b64encode(b"opaque state").decode("ascii")
     root = xml_parser.load_project(audition.build_probe_project(str(tmp_path / "Fake Synth.vst3"), tmp_path / "probe.mmp", kind="vst3", cid=VST3_CID, state=state))
@@ -157,6 +241,24 @@ def test_build_probe_project_resolves_lv2_bundle_uri(tmp_path):
 def test_build_probe_project_requires_vst3_cid(tmp_path):
     with pytest.raises(ValueError, match="class id"):
         audition.build_probe_project(str(tmp_path / "x.vst3"), tmp_path / "p.mmp", kind="vst3")
+
+
+@pytest.mark.parametrize("cid", ["A" * 31, "A" * 33, "G" * 32, "not-a-cid"])
+def test_invalid_vst3_class_ids_fail_before_render_without_quarantine(tmp_path, monkeypatch, cid):
+    monkeypatch.setattr(
+        audition, "_run_render_process",
+        lambda *_args, **_kwargs: pytest.fail("invalid class id must not render"),
+    )
+
+    result = audition.audition_plugin(
+        str(tmp_path / "Invalid.vst3"), kind="vst3", cid=cid,
+        binary=tmp_path / "mxm",
+    )
+
+    assert result["ok"] is False
+    assert result["quarantined"] is False
+    assert "class id" in result["error"].lower()
+    assert quarantine.list_quarantined() == []
 
 
 def test_measure_attack_time_tracks_a_ramp():
@@ -192,6 +294,36 @@ def test_peak_and_rms_levels():
     assert analysis["rms_dbfs"] == pytest.approx(-9.03, abs=0.2) and analysis["channels"] == 1
 
 
+def test_probe_reports_output_level_and_derived_peak_headroom():
+    analysis = audition.analyze_probe_audio((tone(440.0, 1.0, amplitude=0.25), 48000), lead_in=0.0)
+
+    assert analysis["peak_dbfs"] == pytest.approx(-12.04, abs=0.1)
+    assert analysis["rms_dbfs"] == pytest.approx(-15.05, abs=0.2)
+    assert -analysis["peak_dbfs"] == pytest.approx(12.04, abs=0.1)
+
+
+def test_near_full_scale_is_not_reported_as_confirmed_clipping():
+    analysis = audition.analyze_probe_audio((tone(1000.0, 1.0, amplitude=0.999), 48000), lead_in=0.0)
+    diagnostics = " ".join(analysis["warnings"]).casefold()
+
+    assert analysis["peak_dbfs"] > -0.1
+    assert analysis["clipping_detected"] is False
+    assert analysis["clipped_sample_count"] == 0
+    assert "may clip" in diagnostics
+    assert "clipping detected" not in diagnostics
+
+
+def test_flat_topped_full_scale_audio_reports_confirmed_clipping():
+    source = tone(1000.0, 1.0, amplitude=1.2)
+    clipped = [max(-1.0, min(1.0, sample)) for sample in source]
+    analysis = audition.analyze_probe_audio((clipped, 48000), lead_in=0.0)
+
+    assert analysis["peak_dbfs"] == pytest.approx(0.0, abs=0.01)
+    assert analysis["clipping_detected"] is True
+    assert analysis["clipped_sample_count"] >= 2
+    assert any("clipping detected" in warning.casefold() for warning in analysis["warnings"])
+
+
 def test_analyze_probe_flags_silent_low_notes_and_note_pre_roll():
     a1 = audition.analyze_probe_audio((synthetic_probe(include_c2=False, pre_note_noise=False), 48000))
     assert a1["silent_low_notes"] is True and a1["pre_note_noise"] is False
@@ -222,6 +354,42 @@ def test_build_and_render_success_returns_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(synthetic_probe(include_c2=True)))
     res = audition.audition_plugin("tripleoscillator", binary=tmp_path / "mxm", output_dir=tmp_path / "probe-out", name="Test Synth")
     assert res["ok"] is True and res["quarantined"] is False and (tmp_path / "probe-out/probe.wav").is_file() and (tmp_path / "probe-out/probe.mmp").is_file()
+
+
+def test_successful_silent_render_is_not_quarantined_and_reports_audibility(tmp_path, monkeypatch):
+    silent_render = [0.0] * int((audition.LEAD_IN_SECONDS + audition.PROBE_SECONDS + 0.6) * 48000)
+    monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(silent_render))
+
+    result = audition.audition_plugin(
+        "tripleoscillator", binary=tmp_path / "mxm", output_dir=tmp_path / "silent-probe",
+    )
+
+    assert result["ok"] is True  # render/probe succeeded despite an inaudible patch
+    assert result["render_ok"] is True and result["audible"] is False
+    assert result["quarantined"] is False
+    assert result["metrics"]["audible"] is False
+    assert result["metrics"]["audible_sections"] == []
+    assert result["metrics"]["peak_dbfs"] == -120.0
+    assert any("silent on a held C4" in warning for warning in result["warnings"])
+    assert quarantine.list_quarantined() == []
+
+
+def test_probe_render_uses_canonical_mxm_wav_command(tmp_path, monkeypatch):
+    binary = tmp_path / "mxm"
+    project_path = tmp_path / "probe.mmp"
+    project_path.write_text("probe project")
+    wav_path = tmp_path / "rendered.wav"
+    monkeypatch.setattr(audition, "_run_render_process", _rendering_wav(tone(440.0, 0.1)))
+
+    result = audition.run_probe_render(project_path, wav_path, binary=binary)
+
+    assert result["ok"] is True
+    assert result["command"] == [
+        str(binary), "render", str(project_path), "-o", str(wav_path),
+        "-f", "wav", "-s", "48000", "-b", "160",
+    ]
+    assert result["wav_info"]["channels"] == 2
+    assert result["wav_info"]["sample_rate"] == 48000
 
 
 def test_render_segfault_quarantines_the_plugin(tmp_path, monkeypatch):

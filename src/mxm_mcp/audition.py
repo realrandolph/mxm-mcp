@@ -17,6 +17,7 @@ from itertools import accumulate
 from pathlib import Path
 
 from . import mxm_app, quarantine, xml_parser
+from .instruments import builtin_instrument_display_name, resolve_builtin_instrument
 from .musical_units import TICKS_PER_BEAT
 from .project import LMMSProject
 
@@ -49,6 +50,14 @@ def _resolve_kind(plugin: str, kind: str) -> str:
     if low.endswith((".vst3", ".vst3/")) or "/vst3/" in low: return "vst3"
     if low.endswith(".lv2") or low.startswith(("http://", "https://", "urn:")): return "lv2"
     return "builtin"
+
+
+def _resolve_plugin(plugin: str, kind: str) -> tuple[str, str]:
+    """Resolve a probe target, validating and canonicalizing built-in IDs."""
+    resolved_kind = _resolve_kind(plugin, kind)
+    if resolved_kind == "builtin":
+        return resolved_kind, resolve_builtin_instrument(plugin)
+    return resolved_kind, str(plugin).strip()
 
 
 def _lv2_uri_from_bundle(bundle: Path) -> str:
@@ -95,7 +104,7 @@ def build_probe_project(
     plugin: str, project_path: str | Path, *, kind: str = "", cid: str = "", state: str = "",
     name: str = "", bpm: int = 120, lead_in: float = LEAD_IN_SECONDS, tail_seconds: float = TAIL_SECONDS,
 ) -> Path:
-    r_kind = _resolve_kind(plugin, kind)
+    r_kind, resolved_plugin = _resolve_plugin(plugin, kind)
     if r_kind == "vst3" and not str(cid).strip():
         raise ValueError("VST3 probing requires the plugin class id (cid)")
     target = Path(project_path)
@@ -105,10 +114,28 @@ def build_probe_project(
     project = LMMSProject()
     project.new(bpm=bpm)
     project.set_tempo(int(bpm))
-    instrument = {"lv2": "lv2instrument", "vst3": xml_parser.NATIVE_VST3_HOST}.get(r_kind, str(plugin).strip())
-    project.add_track("instrument", str(name).strip() or "Probe", instrument=instrument)
+    instrument = {"lv2": "lv2instrument", "vst3": xml_parser.NATIVE_VST3_HOST}.get(r_kind, resolved_plugin)
+    # TripleOscillator's stock three-oscillator patch remains intact; reduce
+    # only this probe track's gain to leave headroom for the chord test.
+    track_volume = 65 if r_kind == "builtin" and resolved_plugin == "tripleoscillator" else 100
+    track_name = str(name).strip() or (builtin_instrument_display_name(resolved_plugin) if r_kind == "builtin" else "Probe")
+    project.add_track("instrument", track_name, instrument=instrument, volume=track_volume)
     track = xml_parser.find_track_element(project.root, 0)
-    if r_kind == "lv2":
+    if r_kind == "builtin" and resolved_plugin == "tripleoscillator":
+        # Keep the audition tone centered and in tune, without changing the
+        # shared defaults used by ordinary project construction.
+        oscillator = track.find("instrumenttrack/instrument/tripleoscillator")
+        if oscillator is not None:
+            oscillator.attrib.update({
+                "coarse0": "0", "coarse1": "0", "coarse2": "0",
+                "vol0": "33", "vol1": "0", "vol2": "0",
+                "finer0": "0", "finer1": "0", "finer2": "0",
+                "finel0": "0", "finel1": "0", "finel2": "0",
+                "stphdetun0": "0", "stphdetun1": "0", "stphdetun2": "0",
+                "pan0": "0", "pan1": "0", "pan2": "0",
+                "wavetype0": "0", "phoffset0": "0",
+            })
+    elif r_kind == "lv2":
         xml_parser.configure_native_lv2_instrument(track, _lv2_uri(plugin))
     elif r_kind == "vst3":
         xml_parser.configure_native_vst3_instrument(track, str(plugin).strip(), str(cid), _plugin_state(state, str(cid)))
@@ -374,10 +401,20 @@ def analyze_probe_audio(source, *, sample_rate: int | None = None, lead_in: floa
 
     peak = max(max(abs(v) for v in left), max(abs(v) for v in right))
     rms = _rms(list(left) + list(right))
+    # A near-full-scale sample alone is not proof of clipping. Repeated
+    # samples pinned to the PCM rail indicate a flat-topped waveform.
+    rail = 1.0 - (1.0 / 32768.0)
+    clip_channels = (left,) if left is right else (left, right)
+    clipped_sample_count = sum(abs(value) >= rail for channel in clip_channels for value in channel)
+    clipping_detected = clipped_sample_count >= 2
     levels = {k: _rms_db_window(mono, rate, lead_in + a, lead_in + b) for k, (a, b) in {
         "held": (0.20, 1.40), "octaves": (OCTAVE_START, CHORD_START), "chord": (CHORD_START, RUN_START),
         "run": (RUN_START, PROBE_SECONDS), "c2": (1.51, 1.73),
     }.items()}
+    event_sections = ("held", "octaves", "chord", "run")
+    audible_sections = [section for section in event_sections if levels[section] > -70.0]
+    silent_sections = [section for section in event_sections if levels[section] <= -70.0]
+    audible = bool(audible_sections) and _db(max(max(abs(v) for v in left), max(abs(v) for v in right))) > -70.0
     held_db, c2_db = levels["held"], levels["c2"]
 
     pitch = estimate_fundamental(mono, rate, lead_in + 0.25, lead_in + 1.45)
@@ -405,6 +442,7 @@ def analyze_probe_audio(source, *, sample_rate: int | None = None, lead_in: floa
         if condition: warnings.append(message)
 
     if _db(peak) < -70.0 or held_db < -70.0: warnings.append("silent on a held C4")
+    if not audible: warnings.append("no audible output in any probe note section (all below -70 dBFS)")
     elif pitch["confidence"] < 0.3: warnings.append("no clear pitch (noise, drum or heavily detuned)")
     elif drift is not None:
         cents = (drift - round(drift)) * 100.0
@@ -417,12 +455,15 @@ def analyze_probe_audio(source, *, sample_rate: int | None = None, lead_in: floa
     warn(tail >= 800.0, f"long tail {tail / 1000.0:.1f} s after note-off")
     warn(run_onsets and run_onsets < len(RUN_KEYS) - 1, f"16th run blurs: {run_onsets} of {len(RUN_KEYS)} onsets heard")
     warn(_db(peak) >= -0.1, "probe peaks at full scale (patch may clip)")
+    warn(clipping_detected, f"clipping detected ({clipped_sample_count} samples pinned to full scale)")
 
     return {
         "duration_seconds": round(len(mono) / rate, 3), "sample_rate": rate, "channels": channels, "peak_dbfs": round(_db(peak), 2), "rms_dbfs": round(_db(rms), 2),
         "attack_time_ms": round(attack, 2), "tail_duration_ms": round(tail, 2), "pitch_drift_semitones": None if drift is None else round(drift, 3),
         "detected_fundamental_hz": fundamental, "detected_midi_note": midi_note, "octave_offset": octave, "pitch_confidence": pitch["confidence"],
         "band_balance": bands, "silent_low_notes": bool(silent_low_notes), "pre_note_noise": bool(pre_note_noise), "run_onsets": run_onsets,
+        "audible": audible, "audible_sections": audible_sections, "silent_sections": silent_sections,
+        "clipping_detected": clipping_detected, "clipped_sample_count": clipped_sample_count,
         "section_levels_dbfs": {k: round(levels[k], 2) for k in ("held", "octaves", "chord", "run", "pre_note", "c2")}, "warnings": warnings,
     }
 
@@ -432,8 +473,12 @@ def audition_plugin(
     binary: str | Path | None = None, timeout: float = PROBE_TIMEOUT_SECONDS,
     allow_quarantined: bool = False, output_dir: str | Path | None = None, keep_audio: bool | None = None,
 ) -> dict:
-    identity = str(plugin).strip()
-    if not identity: return {"ok": False, "plugin": identity, "error": "A plugin is required"}
+    requested_plugin = str(plugin).strip()
+    if not requested_plugin: return {"ok": False, "plugin": requested_plugin, "error": "A plugin is required"}
+    try:
+        resolved_kind, identity = _resolve_plugin(requested_plugin, kind)
+    except ValueError as exc:
+        return {"ok": False, "plugin": requested_plugin, "error": str(exc), "quarantined": False, "quarantine": None}
     state = state or preset
     if quarantine.is_quarantined(identity) and not allow_quarantined:
         rec = quarantine.quarantined_entry(identity)
@@ -442,14 +487,14 @@ def audition_plugin(
     keep = bool(output_dir or keep_audio)
     work_dir = Path(output_dir).expanduser() if output_dir else Path(tempfile.mkdtemp(prefix="mxm-audition-"))
     work_dir.mkdir(parents=True, exist_ok=True)
-    disp = str(name).strip()
+    disp = str(name).strip() or (builtin_instrument_display_name(identity) if resolved_kind == "builtin" else "")
 
     def failed(error: str, **extra) -> dict:
         return {"ok": False, "plugin": identity, "error": error, "quarantined": False, "quarantine": None, "work_dir": str(work_dir) if keep else None, **extra}
 
     try:
         try:
-            p_path = build_probe_project(plugin, work_dir / "probe.mmp", kind=kind, cid=cid, state=state, name=disp)
+            p_path = build_probe_project(identity, work_dir / "probe.mmp", kind=resolved_kind, cid=cid, state=state, name=disp)
         except (OSError, ValueError) as exc:
             return failed(f"probe project could not be built: {exc}")
         render = run_probe_render(p_path, work_dir / "probe.wav", binary=binary, timeout=timeout)
@@ -469,7 +514,7 @@ def audition_plugin(
         if (info.get("channels") and info["channels"] != 2) or (info.get("sample_rate") and info["sample_rate"] != 48000):
             metrics["warnings"].append(f"render is {info.get('channels')}-channel at {info.get('sample_rate')} Hz (asked for 48 kHz stereo)")
         return {
-            "ok": True, "plugin": identity, "name": disp, "quarantined": False, "quarantine": None, "probe_seconds": PROBE_SECONDS,
+            "ok": True, "render_ok": True, "audible": metrics["audible"], "plugin": identity, "name": disp, "quarantined": False, "quarantine": None, "probe_seconds": PROBE_SECONDS,
             "render": {k: render.get(k) for k in ("returncode", "wav", "wav_info", "elapsed_seconds", "command")},
             "metrics": metrics, "warnings": metrics["warnings"], "work_dir": str(work_dir) if keep else None,
         }

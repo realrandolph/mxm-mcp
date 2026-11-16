@@ -232,6 +232,20 @@ def test_cached_plugin_lookup_does_not_match_vendor_or_parent_folder(tmp_path):
     assert plugin_permissions.cached_probe_modules("Zebralette3") == [identity.module]
 
 
+def test_cached_display_name_resolution_is_case_and_punctuation_insensitive(tmp_path):
+    identity = plugin_permissions.PluginIdentity(
+        str(tmp_path / "Unrelated Bundle Name.vst3"),
+        str(tmp_path / "module.so"),
+        "a" * 64,
+    )
+    plugin_permissions.cache_probe(identity, {
+        "module": identity.module,
+        "classes": [{"name": "The Synth!", "cid": "A1B2C3D4E5F60718293A4B4C55667788"}],
+    })
+
+    assert plugin_permissions.cached_probe_modules("THE-SYNTH") == [identity.module]
+
+
 def test_elicitation_permanent_allow_and_deny_are_binary_scoped(tmp_path, monkeypatch):
     bundle, _binary, probes = _synthetic_bundle(tmp_path, monkeypatch)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))

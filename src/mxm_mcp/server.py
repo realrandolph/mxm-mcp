@@ -33,6 +33,7 @@ from . import plugin_params as plugin_params_mod
 from . import preset_catalog as preset_catalog_mod
 from . import preset_formats as preset_formats_mod
 from . import quarantine as quarantine_mod
+from .instruments import BUILTIN_INSTRUMENTS
 from .musical_units import MusicalUnitError
 from .path_safety import resolved_path_within
 from .models import (
@@ -64,31 +65,12 @@ def _default_projects_dir() -> Path:
 DEFAULT_PROJECTS_DIR = _default_projects_dir()
 
 # Real LMMS built-in instrument plugin names (as used in the XML
-# <instrument name="..."> attribute). Verified against LMMS source.
-KNOWN_INSTRUMENTS = {
-    "tripleoscillator": "Three-oscillator subtractive synth (default, always works)",
-    "kicker": "Kick drum synthesizer",
-    "audiofileprocessor": "Audio file player/sampler (WAV, OGG, etc.)",
-    "organic": "Additive organ synthesizer",
-    "malletsstk": "Physical modeling mallets (STK)",
-    "freeboy": "Game Boy sound chip emulator (chiptune)",
-    "lb302": "Roland TB-303 style acid bass synth",
-    "monstro": "Powerful 3-oscillator polyphonic synth",
-    "nes": "NES 8-bit sound chip emulator (chiptune)",
-    "opulenz": "OPL3 FM synthesizer (Yamaha DX100 style)",
-    "patman": "GUS patch sampler",
-    "sf2player": "SoundFont (.sf2) sample player",
-    "sfxr": "Retro sound effect generator (chiptune)",
-    "sid": "Commodore 64 SID chip emulator (chiptune)",
-    "slicert": "Beat slicer for chopping audio loops",
-    "vibedstrings": "Vibrating string physical model",
-    "watsyn": "4-oscillator wavetable-style synth",
-    "xpressive": "Expressive mono lead synth",
-    "zynaddsubfx": "ZynAddSubFX powerful feature-rich synth",
-    "gigplayer": "GIG sample library player",
-    "bitinvader": "Bit-crushed wavetable synth",
-    "vestige": "VST plugin host (Windows only)",
-}
+# <instrument name="..."> attribute). Shared with audition ID validation.
+KNOWN_INSTRUMENTS = BUILTIN_INSTRUMENTS
+LISTED_BUILTIN_INSTRUMENTS = (
+    "tripleoscillator", "lb302", "kicker", "organic",
+    "bitinvader", "monstro", "watsyn", "audiofileprocessor",
+)
 
 # Recommended instruments per use case - helps agents pick valid plugins
 INSTRUMENT_RECOMMENDATIONS = {
@@ -2357,17 +2339,9 @@ async def list_instruments(
     entries: list[dict] = []
     if kind in {"all", "instrument"}:
         entries.extend({
-            "name": f"builtin:{k}", "id": k, "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": d,
-        } for k, d in [
-            ("tripleoscillator", "3-oscillator subtractive synth with FM and sync"),
-            ("lb302", "Monophonic 303-style bass synthesizer"),
-            ("kicker", "Drum synthesizer for kicks and percussion"),
-            ("organic", "Additive organ and pad synthesizer"),
-            ("bitinvader", "Wavetable and chiptune synth"),
-            ("monstro", "3-oscillator synth with matrix modulation"),
-            ("watsyn", "4-oscillator wavetable synthesizer"),
-            ("audiofileprocessor", "One-shot and sample player"),
-        ])
+            "name": f"builtin:{instrument}", "id": instrument, "format": "builtin", "vendor": "MXM", "kind": "instrument", "description": description,
+        } for instrument in LISTED_BUILTIN_INSTRUMENTS
+          for description in (KNOWN_INSTRUMENTS[instrument],))
 
     try:
         vst3_plugins, _ = await _authorized_vst3_plugins(None, "list_instruments", {"search": search, "kind": kind, "refresh": refresh}, refresh=refresh)
