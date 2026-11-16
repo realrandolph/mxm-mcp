@@ -1,5 +1,7 @@
 """Registry and canonicalization helpers for MXM built-in instruments."""
 
+import re
+
 BUILTIN_INSTRUMENTS = {
     "tripleoscillator": "Three-oscillator subtractive synth (default, always works)",
     "kicker": "Kick drum synthesizer",
@@ -27,40 +29,18 @@ BUILTIN_INSTRUMENTS = {
 
 
 def resolve_builtin_instrument(plugin: str) -> str:
-    """Return the canonical built-in ID for an ID or list-instruments name."""
+    """Resolve a built-in ID or its registry description to its canonical ID."""
     candidate = str(plugin).strip()
     if candidate.casefold().startswith("builtin:"):
         candidate = candidate.split(":", 1)[1].strip()
-    canonical = {instrument.casefold(): instrument for instrument in BUILTIN_INSTRUMENTS}
-    resolved = canonical.get(candidate.casefold())
+    normalized = re.sub(r"[^a-z0-9]", "", candidate.casefold())
+    resolved = next((instrument for instrument in BUILTIN_INSTRUMENTS
+                     if re.sub(r"[^a-z0-9]", "", instrument.casefold()) == normalized), None)
     if resolved is None:
-        # Friendly display names accepted by the instrument tool/listing.
-        display_names = {
-            "triple oscillator": "tripleoscillator",
-            "three-oscillator subtractive synth": "tripleoscillator",
-            "kick drum synthesizer": "kicker",
-            "audio file player/sampler": "audiofileprocessor",
-            "additive organ synthesizer": "organic",
-            "physical modeling mallets": "malletsstk",
-            "game boy sound chip emulator": "freeboy",
-            "roland tb-303 style acid bass synth": "lb302",
-            "powerful 3-oscillator polyphonic synth": "monstro",
-            "nes 8-bit sound chip emulator": "nes",
-            "opl3 fm synthesizer": "opulenz",
-            "gus patch sampler": "patman",
-            "soundfont (.sf2) sample player": "sf2player",
-            "retro sound effect generator": "sfxr",
-            "commodore 64 sid chip emulator": "sid",
-            "beat slicer": "slicert",
-            "vibrating string physical model": "vibedstrings",
-            "4-oscillator wavetable-style synth": "watsyn",
-            "expressive mono lead synth": "xpressive",
-            "zynaddsubfx powerful feature-rich synth": "zynaddsubfx",
-            "gig sample library player": "gigplayer",
-            "bit-crushed wavetable synth": "bitinvader",
-            "vst plugin host": "vestige",
-        }
-        resolved = display_names.get(candidate.casefold())
+        # Descriptions are the registry's display labels; match them without
+        # punctuation so case and formatting differences do not need aliases.
+        resolved = next((instrument for instrument, description in BUILTIN_INSTRUMENTS.items()
+                         if re.sub(r"[^a-z0-9]", "", description.casefold()) == normalized), None)
     if resolved is None:
         valid = ", ".join(sorted(BUILTIN_INSTRUMENTS))
         raise ValueError(f"unknown built-in instrument {plugin!r}; valid IDs: {valid}")
